@@ -76,7 +76,7 @@ type MissingBlockTxError BlockTxKey
 // Error implements the error interface.
 func (e MissingBlockTxError) Error() string {
 	return fmt.Sprintf("missing record for transaction at block %d index "+
-		"%d", e.BlockHeight, e.BlockIndex)
+		"%d", e.BlockHeight, e.blockIndex)
 }
 
 // MissingValueError implements the MissingValueError interface.
@@ -92,7 +92,7 @@ type MissingDebitsError BlockTxKey
 // Error implements the error interface.
 func (e MissingDebitsError) Error() string {
 	return fmt.Sprintf("missing record for debits at block %d index %d",
-		e.BlockHeight, e.BlockIndex)
+		e.BlockHeight, e.blockIndex)
 }
 
 // MissingValueError implements the MissingValueError interface.
@@ -108,7 +108,7 @@ type MissingCreditError BlockOutputKey
 // Error implements the error interface.
 func (e MissingCreditError) Error() string {
 	return fmt.Sprintf("missing record for received transaction output at "+
-		"block %d index %d output %d", e.BlockHeight, e.BlockIndex,
+		"block %d index %d output %d", e.BlockHeight, e.blockIndex,
 		e.OutputIndex)
 }
 
@@ -126,8 +126,9 @@ type TxRecord struct {
 	s *Store
 }
 
-// Block holds details about a block that contains wallet transactions.
-type Block struct {
+// BlockDescription describes the details pertaining to a block containing
+// transactions relevant to a wallet.
+type BlockDescription struct {
 	Hash   btcwire.ShaHash
 	Time   time.Time
 	Height int32
@@ -169,8 +170,13 @@ type Store struct {
 	// blocks holds wallet transaction records for each block they appear
 	// in.  This is sorted by block height in increasing order.  A separate
 	// map is included to lookup indexes for blocks at some height.
-	blocks       []*blockTxCollection
+	blocks       []*block
 	blockIndexes map[int32]uint32
+
+	// txKeys maps transaction hashes from the most recent transaction with
+	// a some hash to the lookup key to fetch the transaction record from
+	// a block structure.
+	txKeys map[btcwire.ShaHash]BlockTxKey
 
 	unspent map[btcwire.OutPoint]BlockTxKey
 
@@ -188,23 +194,25 @@ type Store struct {
 	notificationLock sync.Locker
 }
 
-// blockTxCollection holds a collection of wallet transactions from exactly one
-// block.
-type blockTxCollection struct {
-	// Block holds the hash, time, and height of the block.
-	Block
+// block holds a collection of wallet transactions from exactly one block.
+type block struct {
+	// BlockDescription describes details concerning the block itself,
+	// such as the hash, time, and height.
+	BlockDescription
+
+	// TODO: add a field for the previous block hash?  This is included in
+	// merkle block, so it could be saved if ever needed.
+
+	// txs holds all transaction records for a block.  Note that the slice
+	// index is not the same as the btcd block index, but is simply the
+	// order in which txs were added.
+	txs []*txRecord
 
 	// amountDeltas is the net increase or decrease of BTC controllable by
 	// wallet addresses due to transactions in this block.  This value only
 	// tracks the total amount, not amounts for individual addresses (which
 	// this txstore implementation is not aware of).
 	amountDeltas blockAmounts
-
-	// txs holds all transaction records for a block, sorted by block index.
-	// A separate map is included to lookup indexes for txs at some block
-	// index.
-	txs       []*txRecord
-	txIndexes map[int]uint32
 }
 
 // unconfirmedStore stores all unconfirmed transactions managed by the Store.
@@ -232,7 +240,10 @@ type unconfirmedStore struct {
 
 // BlockTxKey is a lookup key for a single mined transaction in the store.
 type BlockTxKey struct {
-	BlockIndex  int
+	// NOTE: this is not the same as a btcd block index.  The index within
+	// the block is specific to wallet.
+	blockIndex int
+
 	BlockHeight int32
 }
 
@@ -280,6 +291,7 @@ func New(dir string) *Store {
 		dir:          dir,
 		file:         filename,
 		blockIndexes: map[int32]uint32{},
+		txKeys:       make(map[btcwire.ShaHash]BlockTxKey),
 		unspent:      map[btcwire.OutPoint]BlockTxKey{},
 		unconfirmed: unconfirmedStore{
 			txs:                    map[btcwire.ShaHash]*txRecord{},
@@ -292,7 +304,7 @@ func New(dir string) *Store {
 	}
 }
 
-func (s *Store) lookupBlock(height int32) (*blockTxCollection, error) {
+func (s *Store) lookupBlock(height int32) (*block, error) {
 	if i, ok := s.blockIndexes[height]; ok {
 		return s.blocks[i], nil
 	}
@@ -300,14 +312,14 @@ func (s *Store) lookupBlock(height int32) (*blockTxCollection, error) {
 }
 
 func (s *Store) lookupBlockTx(key BlockTxKey) (*txRecord, error) {
-	coll, err := s.lookupBlock(key.BlockHeight)
+	b, err := s.lookupBlock(key.BlockHeight)
 	if err != nil {
 		return nil, err
 	}
-	if i, ok := coll.txIndexes[key.BlockIndex]; ok {
-		return coll.txs[i], nil
+	if key.blockIndex >= len(b.txs) {
+		return nil, MissingBlockTxError(key)
 	}
-	return nil, MissingBlockTxError{key.BlockIndex, key.BlockHeight}
+	return b.txs[key.blockIndex], nil
 }
 
 func (s *Store) lookupBlockDebits(key BlockTxKey) (*debits, error) {
@@ -339,22 +351,19 @@ func (s *Store) lookupBlockCredit(key BlockOutputKey) (*credit, error) {
 	return txRecord.lookupBlockCredit(key)
 }
 
-func (s *Store) blockCollectionForInserts(block *Block) *blockTxCollection {
-	b, err := s.lookupBlock(block.Height)
+func (s *Store) blockForInserts(blkDesc *BlockDescription) *block {
+	b, err := s.lookupBlock(blkDesc.Height)
 	switch e := err.(type) {
 	case MissingBlockError:
-		b = &blockTxCollection{
-			Block:     *block,
-			txIndexes: map[int]uint32{},
-		}
+		b = &block{BlockDescription: *blkDesc}
 
 		// If this new block cannot be appended to the end of the blocks
 		// slice (which would disobey ordering blocks by their height),
 		// reslice and update the store's map of block heights to block
 		// slice indexes.
-		if len(s.blocks) > 0 && s.blocks[len(s.blocks)-1].Height > block.Height {
+		if len(s.blocks) > 0 && s.blocks[len(s.blocks)-1].Height > blkDesc.Height {
 			i := uint32(len(s.blocks))
-			for i != 0 && s.blocks[i-1].Height >= block.Height {
+			for i != 0 && s.blocks[i-1].Height >= blkDesc.Height {
 				i--
 			}
 			detached := s.blocks[i:]
@@ -374,47 +383,28 @@ func (s *Store) blockCollectionForInserts(block *Block) *blockTxCollection {
 	return b
 }
 
-func (c *blockTxCollection) lookupTxRecord(blockIndex int) (*txRecord, uint32, error) {
-	if i, ok := c.txIndexes[blockIndex]; ok {
-		return c.txs[i], i, nil
+func (b *block) lookupTxRecord(index int) (*txRecord, error) {
+	if index >= len(b.txs) {
+		return nil, MissingBlockTxError{index, b.Height}
 	}
-	return nil, 0, MissingBlockTxError{blockIndex, c.Block.Height}
+	return b.txs[index], nil
 }
 
-func (c *blockTxCollection) txRecordForInserts(tx *btcutil.Tx) *txRecord {
-	if i, ok := c.txIndexes[tx.Index()]; ok {
-		return c.txs[i]
+func (s *Store) txRecordForInserts(tx *btcutil.Tx, blkDesc *BlockDescription) *txRecord {
+	if key, ok := s.txKeys[*tx.Sha()]; ok {
+		idx := s.blockIndexes[key.Height]
+		return b.txs[key.blockIndex]
 	}
 
-	log.Infof("Inserting transaction %v from block %d", tx.Sha(), c.Height)
+	b := s.blockForInserts(blkDesc)
+
+	s.txKeys[
+
+	log.Infof("Inserting transaction %v from block %d", tx.Sha(), b.Height)
 	record := &txRecord{tx: tx}
-
-	// If this new transaction record cannot be appended to the end of the
-	// txs slice (which would disobey ordering transactions by their block
-	// index), reslice and update the block's map of block indexes to txs
-	// slice indexes.
-	if len(c.txs) > 0 && c.txs[len(c.txs)-1].Tx().Index() > tx.Index() {
-		i := uint32(len(c.txs))
-		for i != 0 && c.txs[i-1].Tx().Index() >= tx.Index() {
-			i--
-		}
-		detached := c.txs[i:]
-		c.txs = append(c.txs[:i], record)
-		c.txIndexes[tx.Index()] = i
-		for i, r := range detached {
-			newIndex := uint32(i + len(c.txs))
-			c.txIndexes[r.Tx().Index()] = newIndex
-		}
-		c.txs = append(c.txs, detached...)
-	} else {
-		c.txIndexes[tx.Index()] = uint32(len(c.txs))
-		c.txs = append(c.txs, record)
-	}
+	b.txIndexes[*tx.Sha()] = len(b.txs)
+	b.txs = append(b.txs, record)
 	return record
-}
-
-func (s *Store) blockTxRecordForInserts(tx *btcutil.Tx, block *Block) *txRecord {
-	return s.blockCollectionForInserts(block).txRecordForInserts(tx)
 }
 
 func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
@@ -430,16 +420,16 @@ func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 	return r
 }
 
-func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
+func (s *Store) moveMinedTx(r *txRecord, blkDesc *BlockDescription) error {
 	log.Infof("Marking unconfirmed transaction %v mined in block %d",
-		r.tx.Sha(), block.Height)
+		r.tx.Sha(), blkDesc.Height)
 
 	delete(s.unconfirmed.txs, *r.Tx().Sha())
 
 	// Find collection and insert records.  Error out if there are records
 	// saved for this block and index.
-	key := BlockTxKey{r.Tx().Index(), block.Height}
-	b := s.blockCollectionForInserts(block)
+	key := BlockTxKey{r.Tx().Index(), blkDesc.Height}
+	b := s.blockForInserts(blkDesc)
 	txIndex := uint32(len(b.txs))
 	b.txIndexes[key.BlockIndex] = txIndex
 	b.txs = append(b.txs, r)
@@ -587,6 +577,8 @@ func (s *Store) InsertTx(tx *btcutil.Tx, block *Block) (*TxRecord, error) {
 		return nil, err
 	}
 
+	// TODO: verify that the tx isn't already in the store. If it isn't,
+	// *then* create it.
 	r := s.blockTxRecordForInserts(tx, block)
 	if r.received.IsZero() {
 		if !block.Time.IsZero() && block.Time.Before(received) {
@@ -1455,7 +1447,7 @@ func (t *TxRecord) IsCoinbase() bool {
 }
 
 func (t *TxRecord) isCoinbase() bool {
-	return t.BlockHeight != -1 && t.BlockIndex == 0
+	return btcchain.IsCoinBase(t.tx)
 }
 
 // Amount returns the amount credited to the account from a transaction output.

@@ -32,15 +32,18 @@ func (w *Wallet) handleChainNotifications() {
 			w.connectBlock(keystore.BlockStamp(n))
 		case chain.BlockDisconnected:
 			w.disconnectBlock(keystore.BlockStamp(n))
-		case chain.RecvTx:
-			err = w.addReceivedTx(n.Tx, n.Block)
-		case chain.RedeemingTx:
-			err = w.addRedeemingTx(n.Tx, n.Block)
+		case chain.MerkleBlock:
+			err = w.maybeAddBlockTxs(n.MerkleBlock, n.Txs)
+		case *chain.FilteredTx:
+			err = w.maybeAddMempoolTx((*btcutil.Tx)(n))
 
 		// The following are handled by the wallet's rescan
 		// goroutines, so just pass them there.
 		case *chain.RescanProgress, *chain.RescanFinished:
 			w.rescanNotifications <- n
+
+		default: // Unexpected notification
+			panic(n)
 		}
 		if err != nil {
 			log.Errorf("Cannot handle chain server "+
@@ -90,18 +93,18 @@ func (w *Wallet) disconnectBlock(bs keystore.BlockStamp) {
 	w.notifyBalances(bs.Height - 1)
 }
 
-func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
-	// For every output, if it pays to a wallet address, insert the
-	// transaction into the store (possibly moving it from unconfirmed to
-	// confirmed), and add a credit record if one does not already exist.
+func (w *Wallet) maybeAddBlockTxs(mblk *btcwire.MsgMerkleBlock, txs []*btcutil.Tx) error {
+	// For every output, if it is relevant to the wallet, mark it as a
+	// wallet credit when the tx is inserted or moved from unconfirmed.
 	var txr *txstore.TxRecord
 	txInserted := false
+	
 	for txOutIdx, txOut := range tx.MsgTx().TxOut {
-		// Errors don't matter here.  If addrs is nil, the range below
-		// does nothing.
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txOut.PkScript,
+		_, addrs, _, err := btcscript.ExtractPkScriptAddrs(txOut.PkScript,
 			activeNet.Params)
-		insert := false
+		if err != nil {
+			continue
+		}
 		for _, addr := range addrs {
 			_, err := w.KeyStore.Address(addr)
 			if err == nil {

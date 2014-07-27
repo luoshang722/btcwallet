@@ -25,9 +25,7 @@ import (
 	"github.com/conformal/btcrpcclient"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/keystore"
-	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/btcws"
 )
 
 type Client struct {
@@ -64,8 +62,8 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 		OnClientConnected:   client.onClientConnect,
 		OnBlockConnected:    client.onBlockConnected,
 		OnBlockDisconnected: client.onBlockDisconnected,
-		OnRecvTx:            client.onRecvTx,
-		OnRedeemingTx:       client.onRedeemingTx,
+		OnMerkleBlock:       client.onMerkleBlock,
+		OnFilteredTx:        client.onFilteredTx,
 		OnRescanFinished:    client.onRescanFinished,
 		OnRescanProgress:    client.onRescanProgress,
 	}
@@ -152,14 +150,11 @@ func (c *Client) BlockStamp() (*keystore.BlockStamp, error) {
 type (
 	BlockConnected    keystore.BlockStamp
 	BlockDisconnected keystore.BlockStamp
-	RecvTx            struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
+	MerkleBlock struct {
+		MerkleBlock *btcwire.MsgMerkleBlock
+		Txs         []*btcutil.Tx
 	}
-	RedeemingTx struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
-	}
+	FilteredTx     btcutil.Tx
 	RescanProgress struct {
 		Hash   *btcwire.ShaHash
 		Height int32
@@ -172,30 +167,6 @@ type (
 	}
 )
 
-// parseBlock parses a btcws definition of the block a tx is mined it to the
-// Block structure of the txstore package, and the block index.  This is done
-// here since btcrpcclient doesn't parse this nicely for us.
-func parseBlock(block *btcws.BlockDetails) (blk *txstore.Block, idx int, err error) {
-	if block == nil {
-		return nil, btcutil.TxIndexUnknown, nil
-	}
-	blksha, err := btcwire.NewShaHashFromStr(block.Hash)
-	if err != nil {
-		return nil, btcutil.TxIndexUnknown, err
-	}
-	blk = &txstore.Block{
-		Height: block.Height,
-		Hash:   *blksha,
-		Time:   time.Unix(block.Time, 0),
-	}
-	return blk, block.Index, nil
-}
-
-func (c *Client) onClientConnect() {
-	log.Info("Established websocket RPC connection to btcd")
-	c.notifyConnected(true)
-}
-
 func (c *Client) onBlockConnected(hash *btcwire.ShaHash, height int32) {
 	c.enqueueNotification <- BlockConnected{Hash: hash, Height: height}
 }
@@ -204,36 +175,12 @@ func (c *Client) onBlockDisconnected(hash *btcwire.ShaHash, height int32) {
 	c.enqueueNotification <- BlockDisconnected{Hash: hash, Height: height}
 }
 
-func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
-	var blk *txstore.Block
-	index := btcutil.TxIndexUnknown
-	if block != nil {
-		var err error
-		blk, index, err = parseBlock(block)
-		if err != nil {
-			// Log and drop improper notification.
-			log.Errorf("recvtx notification bad block: %v", err)
-			return
-		}
-	}
-	tx.SetIndex(index)
-	c.enqueueNotification <- RecvTx{tx, blk}
+func (c *Client) onMerkleBlock(mblk *btcwire.MsgMerkleBlock, txs []*btcutil.Tx) {
+	c.enqueueNotification <- MerkleBlock{mblk, txs}
 }
 
-func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
-	var blk *txstore.Block
-	index := btcutil.TxIndexUnknown
-	if block != nil {
-		var err error
-		blk, index, err = parseBlock(block)
-		if err != nil {
-			// Log and drop improper notification.
-			log.Errorf("recvtx notification bad block: %v", err)
-			return
-		}
-	}
-	tx.SetIndex(index)
-	c.enqueueNotification <- RedeemingTx{tx, blk}
+func (c *Client) onFilteredTx(tx *btcutil.Tx) {
+	c.enqueueNotification <- (*FilteredTx)(tx)
 }
 
 func (c *Client) onRescanProgress(hash *btcwire.ShaHash, height int32, blkTime time.Time) {
