@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2013-2015 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,34 +19,84 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
+
+	"google.golang.org/grpc/grpclog"
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
 
-const (
-	// lockTimeThreshold is the number below which a lock time is
-	// interpreted to be a block number.  Since an average of one block
-	// is generated per 10 minutes, this allows blocks for about 9,512
-	// years.  However, if the field is interpreted as a timestamp, given
-	// the lock time is a uint32, the max is sometime around 2106.
-	lockTimeThreshold uint32 = 5e8 // Tue Nov 5 00:53:20 1985 UTC
-)
+// grpcLogger implements the grpclog.Logger interface so btclog backends may be
+// used by the grpc server.
+type grpcLogger struct {
+	btclog.Logger
+}
+
+// stripGrpcPrefix removes the package prefix for all logs made to the grpc
+// logger, since these are already included as the btclog subsystem name.
+func stripGrpcPrefix(logstr string) string {
+	return strings.TrimPrefix(logstr, "grpc: ")
+}
+
+// stripGrpcPrefixArgs removes the package prefix from the first argument, if it
+// exists and is a string, returning the same arg slice after reassigning the
+// first arg.
+func stripGrpcPrefixArgs(args ...interface{}) []interface{} {
+	if len(args) == 0 {
+		return args
+	}
+	firstArgStr, ok := args[0].(string)
+	if ok {
+		args[0] = stripGrpcPrefix(firstArgStr)
+	}
+	return args
+}
+
+func (l grpcLogger) Fatal(args ...interface{}) {
+	l.Critical(stripGrpcPrefixArgs(args)...)
+	os.Exit(1)
+}
+
+func (l grpcLogger) Fatalf(format string, args ...interface{}) {
+	l.Criticalf(stripGrpcPrefix(format), args...)
+	os.Exit(1)
+}
+
+func (l grpcLogger) Fatalln(args ...interface{}) {
+	l.Critical(stripGrpcPrefixArgs(args)...)
+	os.Exit(1)
+}
+
+func (l grpcLogger) Print(args ...interface{}) {
+	l.Info(stripGrpcPrefixArgs(args)...)
+}
+
+func (l grpcLogger) Printf(format string, args ...interface{}) {
+	l.Infof(stripGrpcPrefix(format), args...)
+}
+
+func (l grpcLogger) Println(args ...interface{}) {
+	l.Info(stripGrpcPrefixArgs(args)...)
+}
 
 // Loggers per subsytem.  Note that backendLog is a seelog logger that all of
 // the subsystem loggers route their messages to.  When adding new subsystems,
 // add a reference here, to the subsystemLoggers map, and the useLogger
 // function.
 var (
-	backendLog = seelog.Disabled
-	log        = btclog.Disabled
-	walletLog  = btclog.Disabled
-	txmgrLog   = btclog.Disabled
-	chainLog   = btclog.Disabled
+	backendLog   = seelog.Disabled
+	log          = btclog.Disabled
+	walletLog    = btclog.Disabled
+	txmgrLog     = btclog.Disabled
+	chainLog     = btclog.Disabled
+	grpcLog      = btclog.Disabled
+	legacyRPCLog = btclog.Disabled
 )
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
@@ -55,6 +105,8 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"WLLT": walletLog,
 	"TMGR": txmgrLog,
 	"CHNS": chainLog,
+	"GRPC": grpcLog,
+	"LRPC": legacyRPCLog,
 }
 
 // logClosure is used to provide a closure over expensive logging operations
@@ -94,6 +146,12 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		chainLog = logger
 		chain.UseLogger(logger)
 		btcrpcclient.UseLogger(logger)
+	case "GRPC":
+		grpcLog = logger
+		grpclog.SetLogger(grpcLogger{logger})
+	case "LRPC":
+		legacyRPCLog = logger
+		legacyrpc.UseLogger(logger)
 	}
 }
 

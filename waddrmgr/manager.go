@@ -147,6 +147,8 @@ type addrKey string
 // private extended key so the unencrypted versions can be cleared from memory
 // when the address manager is locked.
 type accountInfo struct {
+	acctName string
+
 	// The account key is used to derive the branches which in turn derive
 	// the internal and external addresses.
 	// The accountKeyPriv will be nil when the address manager is locked.
@@ -163,6 +165,14 @@ type accountInfo struct {
 	// intended for internal wallet use such as change addresses.
 	nextInternalIndex uint32
 	lastInternalAddr  ManagedAddress
+}
+
+type AccountProperties struct {
+	AccountNumber    uint32
+	AccountName      string
+	ExternalKeyCount uint32
+	InternalKeyCount uint32
+	ImportedKeyCount uint32
 }
 
 // unlockDeriveInfo houses the information needed to derive a private key for a
@@ -487,6 +497,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	// Create the new account info with the known information.  The rest
 	// of the fields are filled out below.
 	acctInfo := &accountInfo{
+		acctName:          row.name,
 		acctKeyEncrypted:  row.privKeyEncrypted,
 		acctKeyPub:        acctKeyPub,
 		nextExternalIndex: row.nextExternalIndex,
@@ -545,6 +556,35 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	// Add it to the cache and return it when everything is successful.
 	m.acctInfo[account] = acctInfo
 	return acctInfo, nil
+}
+
+// AccountProperties returns the current name,
+// TODO: Return the new account properties each time an account change occurs
+// to avoid opening a second read transaction after the write.
+func (m *Manager) AccountProperties(account uint32) (*AccountProperties, error) {
+	defer m.mtx.RUnlock()
+	m.mtx.RLock()
+
+	acctInfo, err := m.loadAccountInfo(account)
+	if err != nil {
+		return nil, err
+	}
+
+	props := &AccountProperties{
+		AccountNumber: account,
+		AccountName:   acctInfo.acctName,
+	}
+
+	// Until keys can be imported into any account, special handling is
+	// required for the imported account.
+	if account != ImportedAddrAccount {
+		props.ExternalKeyCount = acctInfo.nextExternalIndex
+		props.InternalKeyCount = acctInfo.nextInternalIndex
+	} else {
+		props.ImportedKeyCount = 0
+	}
+
+	return props, nil
 }
 
 // deriveKeyFromPath returns either a public or private derived extended key
@@ -1804,7 +1844,7 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 		if err = deleteAccountIDIndex(tx, account); err != nil {
 			return err
 		}
-		// Remove the old name key from the accout name index
+		// Remove the old name key from the account name index
 		if err = deleteAccountNameIndex(tx, row.name); err != nil {
 			return err
 		}
@@ -1812,6 +1852,15 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 			row.privKeyEncrypted, row.nextExternalIndex, row.nextInternalIndex, name)
 		return err
 	})
+
+	// Update in-memory account info with new name if cached and the db
+	// write was successful.
+	if err == nil {
+		if acctInfo, ok := m.acctInfo[account]; ok {
+			acctInfo.acctName = name
+		}
+	}
+
 	return err
 }
 
@@ -2230,6 +2279,12 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	}
 	if exists {
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
+	}
+
+	// Ensure the private passphrase is not empty.
+	if len(privPassphrase) == 0 {
+		str := "private passphrase may not be empty"
+		return nil, managerError(ErrEmptyPassphrase, str, nil)
 	}
 
 	// Perform the initial bucket creation and database namespace setup.

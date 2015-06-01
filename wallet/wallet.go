@@ -34,6 +34,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -42,6 +43,16 @@ import (
 )
 
 const (
+	// DefaultPubPassphrase is the default outer encryption passphrase used
+	// for public data (everything but private keys).  Using a non-default
+	// public passphrase can prevent an attacker without the public
+	// passphrase from discovering all past and future wallet addresses if
+	// they gain access to the wallet database.
+	//
+	// NOTE: at time of writing, public encryption only applies to public
+	// data in the waddrmgr namespace.  Transactions are not yet encrypted.
+	DefaultPubPassphrase = "public"
+
 	walletDbWatchingOnlyName = "wowallet.db"
 )
 
@@ -60,15 +71,17 @@ var (
 // complete wallet.  It contains the Armory-style key store
 // addresses and keys),
 type Wallet struct {
+	publicPassphrase []byte
+
 	// Data stores
 	db      walletdb.DB
 	Manager *waddrmgr.Manager
 	TxStore *wtxmgr.Store
 
-	chainSvr        *chain.Client
-	chainSvrLock    sync.Mutex
-	chainSvrSynced  bool
-	chainSvrSyncMtx sync.Mutex
+	chainClient        *chain.RPCClient
+	chainClientLock    sync.Mutex
+	chainClientSynced  bool
+	chainClientSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 	FeeIncrement    btcutil.Amount
@@ -93,9 +106,14 @@ type Wallet struct {
 	lockState          chan bool
 	changePassphrase   chan changePassphraseRequest
 
-	// Notification channels so other components can listen in on wallet
-	// activity.  These are initialized as nil, and must be created by
-	// calling one of the Listen* methods.
+	NtfnServer *NotificationServer
+
+	// Legacy notification channels so other components can listen in on
+	// wallet activity.  These are initialized as nil, and must be created
+	// by calling one of the Listen* methods.
+	//
+	// These channels and the features needed by them are on a fast path to
+	// deletion.  Use the server instead.
 	connectedBlocks    chan wtxmgr.BlockMeta
 	disconnectedBlocks chan wtxmgr.BlockMeta
 	relevantTxs        chan chain.RelevantTx
@@ -263,7 +281,7 @@ func (w *Wallet) notifyRelevantTx(relevantTx chain.RelevantTx) {
 }
 
 // Start starts the goroutines necessary to manage a wallet.
-func (w *Wallet) Start(chainServer *chain.Client) {
+func (w *Wallet) Start() {
 	w.quitMu.Lock()
 	select {
 	case <-w.quit:
@@ -280,17 +298,55 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 	}
 	w.quitMu.Unlock()
 
-	w.chainSvrLock.Lock()
-	w.chainSvr = chainServer
-	w.chainSvrLock.Unlock()
-
-	w.wg.Add(6)
-	go w.handleChainNotifications()
+	w.wg.Add(2)
 	go w.txCreator()
 	go w.walletLocker()
+}
+
+func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
+	w.quitMu.Lock()
+	select {
+	case <-w.quit:
+		w.quitMu.Unlock()
+		return
+	default:
+	}
+	w.quitMu.Unlock()
+
+	w.chainClientLock.Lock()
+	if w.chainClient != nil {
+		w.chainClientLock.Unlock()
+		return
+	}
+	w.chainClient = chainClient
+	w.chainClientLock.Unlock()
+
+	// TODO: It would be preferable to either run these goroutines
+	// separately from the wallet (use wallet mutator functions to
+	// make changes from the RPC client) and not have to stop and
+	// restart them each time the client disconnects and reconnets.
+	w.wg.Add(4)
+	go w.handleChainNotifications()
 	go w.rescanBatchHandler()
 	go w.rescanProgressHandler()
 	go w.rescanRPCHandler()
+}
+
+func (w *Wallet) requireChainClient() (*chain.RPCClient, error) {
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	if chainClient == nil {
+		return nil, errors.New("blockchain RPC is inactive")
+	}
+	return chainClient, nil
+}
+
+func (w *Wallet) ChainClient() *chain.RPCClient {
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	return chainClient
 }
 
 // quitChan atomically reads the quit channel.
@@ -311,11 +367,12 @@ func (w *Wallet) Stop() {
 	case <-quit:
 	default:
 		close(quit)
-		w.chainSvrLock.Lock()
-		if w.chainSvr != nil {
-			w.chainSvr.Stop()
+		w.chainClientLock.Lock()
+		if w.chainClient != nil {
+			w.chainClient.Stop()
+			w.chainClient = nil
 		}
-		w.chainSvrLock.Unlock()
+		w.chainClientLock.Unlock()
 	}
 }
 
@@ -332,20 +389,33 @@ func (w *Wallet) ShuttingDown() bool {
 
 // WaitForShutdown blocks until all wallet goroutines have finished executing.
 func (w *Wallet) WaitForShutdown() {
-	w.chainSvrLock.Lock()
-	if w.chainSvr != nil {
-		w.chainSvr.WaitForShutdown()
+	w.chainClientLock.Lock()
+	if w.chainClient != nil {
+		w.chainClient.WaitForShutdown()
 	}
-	w.chainSvrLock.Unlock()
+	w.chainClientLock.Unlock()
 	w.wg.Wait()
+}
+
+// SynchronizingToNetwork returns whether the wallet is currently synchronizing
+// with the Bitcoin network.
+func (w *Wallet) SynchronizingToNetwork() bool {
+	// At the moment, RPC is the only synchronization method.  In the
+	// future, when SPV is added, a separate check will also be needed, or
+	// SPV could always be enabled if RPC was not explicitly specified when
+	// creating the wallet.
+	w.chainClientSyncMtx.Lock()
+	syncing := w.chainClient != nil
+	w.chainClientSyncMtx.Unlock()
+	return syncing
 }
 
 // ChainSynced returns whether the wallet has been attached to a chain server
 // and synced up to the best block on the main chain.
 func (w *Wallet) ChainSynced() bool {
-	w.chainSvrSyncMtx.Lock()
-	synced := w.chainSvrSynced
-	w.chainSvrSyncMtx.Unlock()
+	w.chainClientSyncMtx.Lock()
+	synced := w.chainClientSynced
+	w.chainClientSyncMtx.Unlock()
 	return synced
 }
 
@@ -357,9 +427,9 @@ func (w *Wallet) ChainSynced() bool {
 // until the reconnect notification is received, at which point the wallet can be
 // marked out of sync again until after the next rescan completes.
 func (w *Wallet) SetChainSynced(synced bool) {
-	w.chainSvrSyncMtx.Lock()
-	w.chainSvrSynced = synced
-	w.chainSvrSyncMtx.Unlock()
+	w.chainClientSyncMtx.Lock()
+	w.chainClientSynced = synced
+	w.chainClientSyncMtx.Unlock()
 }
 
 // activeData returns the currently-active receiving addresses and all unspent
@@ -383,6 +453,11 @@ func (w *Wallet) activeData() ([]btcutil.Address, []wtxmgr.Credit, error) {
 // finished.
 //
 func (w *Wallet) syncWithChain() error {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
 	// Request notifications for connected and disconnected blocks.
 	//
 	// TODO(jrick): Either request this notification only once, or when
@@ -391,7 +466,7 @@ func (w *Wallet) syncWithChain() error {
 	// as well.  I am leaning towards allowing off all btcrpcclient
 	// notification re-registrations, in which case the code here should be
 	// left as is.
-	err := w.chainSvr.NotifyBlocks()
+	err = chainClient.NotifyBlocks()
 	if err != nil {
 		return err
 	}
@@ -406,6 +481,28 @@ func (w *Wallet) syncWithChain() error {
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
 
+	// When no addresses have been generated for the wallet, the rescan can
+	// be skipped.
+	//
+	// TODO: This is only correct because activeData above returns all
+	// addresses ever created, including those that don't need to be watched
+	// anymore.  This code should be updated when this assumption is no
+	// longer true, but worst case would result in an unnecessary rescan.
+	if len(addrs) == 0 && len(unspent) == 0 {
+		// TODO: It would be ideal if on initial sync wallet saved the
+		// last several recent blocks rather than just one.  This would
+		// avoid a full rescan for a one block reorg of the current
+		// chain tip.
+		hash, height, err := chainClient.GetBestBlock()
+		if err != nil {
+			return err
+		}
+		return w.Manager.SetSyncedTo(&waddrmgr.BlockStamp{
+			Hash:   *hash,
+			Height: height,
+		})
+	}
+
 	// Compare previously-seen blocks against the chain server.  If any of
 	// these blocks no longer exist, rollback all of the missing blocks
 	// before catching up with the rescan.
@@ -419,7 +516,7 @@ func (w *Wallet) syncWithChain() error {
 		bs := iter.BlockStamp()
 		log.Debugf("Checking for previous saved block with height %v hash %v",
 			bs.Height, bs.Hash)
-		_, err = w.chainSvr.GetBlock(&bs.Hash)
+		_, err = chainClient.GetBlock(&bs.Hash)
 		if err != nil {
 			rollback = true
 			continue
@@ -508,7 +605,7 @@ func (w *Wallet) CreateSimpleTx(account uint32, pairs map[string]btcutil.Amount,
 type (
 	unlockRequest struct {
 		passphrase []byte
-		timeout    time.Duration // Zero value prevents the timeout.
+		lockAfter  <-chan time.Time // nil prevents the timeout.
 		err        chan error
 	}
 
@@ -540,11 +637,7 @@ out:
 				continue
 			}
 			w.notifyLockStateChange(false)
-			if req.timeout == 0 {
-				timeout = nil
-			} else {
-				timeout = time.After(req.timeout)
-			}
+			timeout = req.lockAfter
 			req.err <- nil
 			continue
 
@@ -582,6 +675,7 @@ out:
 			break out
 
 		case <-w.lockRequests:
+			timeout = nil
 		case <-timeout:
 		}
 
@@ -605,11 +699,11 @@ out:
 // correct, the current timeout is replaced with the new one.  The wallet will
 // be locked if the passphrase is incorrect or any other error occurs during the
 // unlock.
-func (w *Wallet) Unlock(passphrase []byte, timeout time.Duration) error {
+func (w *Wallet) Unlock(passphrase []byte, lock <-chan time.Time) error {
 	err := make(chan error, 1)
 	w.unlockRequests <- unlockRequest{
 		passphrase: passphrase,
-		timeout:    timeout,
+		lockAfter:  lock,
 		err:        err,
 	}
 	return <-err
@@ -766,6 +860,40 @@ func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 	}
 
 	return addr.Address(), nil
+}
+
+func (w *Wallet) RenameAccount(account uint32, newName string) error {
+	err := w.Manager.RenameAccount(account, newName)
+	if err != nil {
+		return err
+	}
+
+	props, err := w.Manager.AccountProperties(account)
+	if err != nil {
+		log.Errorf("Cannot fetch new account properties for notification "+
+			"during account rename: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	return nil
+}
+
+func (w *Wallet) NextAccount(name string) (uint32, error) {
+	account, err := w.Manager.NewAccount(name)
+	if err != nil {
+		return 0, err
+	}
+
+	props, err := w.Manager.AccountProperties(account)
+	if err != nil {
+		log.Errorf("Cannot fetch new account properties for notification "+
+			"after account creation: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	return account, nil
 }
 
 // CreditCategory describes the type of wallet transaction output.  The category
@@ -1066,6 +1194,165 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 	return txList, err
 }
 
+type GetTransactionsResult struct {
+	MinedTransactions   []Block
+	UnminedTransactions []TransactionSummary
+}
+
+type BlockIdentifier struct {
+	height int32
+	hash   *wire.ShaHash
+}
+
+func NewBlockIdentifierFromHeight(height int32) *BlockIdentifier {
+	return &BlockIdentifier{height: height}
+}
+
+func NewBlockIdentifierFromHash(hash *wire.ShaHash) *BlockIdentifier {
+	return &BlockIdentifier{hash: hash}
+}
+
+func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <-chan struct{}) (*GetTransactionsResult, error) {
+	var start, end int32 = 0, -1
+
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+
+	// TODO: Fetching block heights by their hashes is inherently racy
+	// because not all block headers are saved but when they are for SPV the
+	// db can be queried directly without this.
+	var startResp, endResp btcrpcclient.FutureGetBlockVerboseResult
+	if startBlock != nil {
+		if startBlock.hash == nil {
+			start = startBlock.height
+		} else {
+			if chainClient == nil {
+				return nil, errors.New("no chain server client")
+			}
+			startResp = chainClient.GetBlockVerboseAsync(startBlock.hash, false)
+		}
+	}
+	if endBlock != nil {
+		if endBlock.hash == nil {
+			end = endBlock.height
+		} else {
+			if chainClient == nil {
+				return nil, errors.New("no chain server client")
+			}
+			endResp = chainClient.GetBlockVerboseAsync(endBlock.hash, false)
+		}
+	}
+	if startResp != nil {
+		resp, err := startResp.Receive()
+		if err != nil {
+			return nil, err
+		}
+		start = int32(resp.Height)
+	}
+	if endResp != nil {
+		resp, err := endResp.Receive()
+		if err != nil {
+			return nil, err
+		}
+		end = int32(resp.Height)
+	}
+
+	var res GetTransactionsResult
+	err := w.TxStore.RangeTransactions(start, end, func(details []wtxmgr.TxDetails) (bool, error) {
+		// TODO: probably should make RangeTransactions not reuse the
+		// details backing array memory.
+		dets := make([]wtxmgr.TxDetails, len(details))
+		copy(dets, details)
+		details = dets
+
+		txs := make([]TransactionSummary, 0, len(details))
+		for i := range details {
+			txs = append(txs, makeTxSummary(w, &details[i]))
+		}
+
+		if details[0].Block.Height != -1 {
+			blockHash := details[0].Block.Hash
+			res.MinedTransactions = append(res.MinedTransactions, Block{
+				Hash:         &blockHash,
+				Height:       details[0].Block.Height,
+				Timestamp:    details[0].Block.Time.Unix(),
+				Transactions: txs,
+			})
+		} else {
+			res.UnminedTransactions = txs
+		}
+
+		select {
+		case <-cancel:
+			return true, nil
+		default:
+			return false, nil
+		}
+	})
+	return &res, err
+}
+
+type AccountResult struct {
+	AccountNumber uint32
+	AccountName   string
+	TotalBalance  btcutil.Amount
+}
+
+type AccountsResult struct {
+	Accounts           []AccountResult
+	CurrentBlockHash   *wire.ShaHash
+	CurrentBlockHeight int32
+}
+
+func (w *Wallet) Accounts() (*AccountsResult, error) {
+	var accounts []AccountResult
+	syncBlock := w.Manager.SyncedTo()
+	unspent, err := w.TxStore.UnspentOutputs()
+	if err != nil {
+		return nil, err
+	}
+	err = w.Manager.ForEachAccount(func(acct uint32) error {
+		name, err := w.Manager.AccountName(acct)
+		if err != nil {
+			return err
+		}
+		accounts = append(accounts, AccountResult{
+			AccountNumber: acct,
+			AccountName:   name,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[uint32]*btcutil.Amount)
+	for i := range accounts {
+		a := &accounts[i]
+		m[a.AccountNumber] = &a.TotalBalance
+	}
+	for i := range unspent {
+		output := &unspent[i]
+		var outputAcct uint32
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams)
+		if err == nil && len(addrs) > 0 {
+			outputAcct, err = w.Manager.AddrAccount(addrs[0])
+		}
+		if err == nil {
+			amt, ok := m[outputAcct]
+			if ok {
+				*amt += output.Amount
+			}
+		}
+	}
+	return &AccountsResult{
+		Accounts:           accounts,
+		CurrentBlockHash:   &syncBlock.Hash,
+		CurrentBlockHeight: syncBlock.Height,
+	}, nil
+}
+
 // creditSlice satisifies the sort.Interface interface to provide sorting
 // transaction credits from oldest to newest.  Credits with the same receive
 // time and mined in the same block are not guaranteed to be sorted by the order
@@ -1331,13 +1618,21 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 	addrStr := addr.Address().EncodeAddress()
 	log.Infof("Imported payment address %s", addrStr)
 
+	props, err := w.Manager.AccountProperties(waddrmgr.ImportedAddrAccount)
+	if err != nil {
+		log.Errorf("Cannot fetch account properties for imported "+
+			"account after importing key: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
 	// Return the payment address string of the imported private key.
 	return addrStr, nil
 }
 
 // ExportWatchingWallet returns a watching-only version of the wallet serialized
 // database as a base64-encoded string.
-func (w *Wallet) ExportWatchingWallet(pubPass string) (string, error) {
+func (w *Wallet) ExportWatchingWallet() (string, error) {
 	tmpDir, err := ioutil.TempDir("", "btcwallet")
 	if err != nil {
 		return "", err
@@ -1370,7 +1665,7 @@ func (w *Wallet) ExportWatchingWallet(pubPass string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	woMgr, err := waddrmgr.Open(namespace, []byte(pubPass),
+	woMgr, err := waddrmgr.Open(namespace, w.publicPassphrase,
 		w.chainParams, nil)
 	if err != nil {
 		return "", err
@@ -1449,13 +1744,19 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 // credits that are not known to have been mined into a block, and attempts
 // to send each to the chain server for relay.
 func (w *Wallet) ResendUnminedTxs() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("No chain server available to resend unmined transactions")
+		return
+	}
+
 	txs, err := w.TxStore.UnminedTxs()
 	if err != nil {
 		log.Errorf("Cannot load unmined transactions for resending: %v", err)
 		return
 	}
 	for _, tx := range txs {
-		resp, err := w.chainSvr.SendRawTransaction(tx, false)
+		resp, err := chainClient.SendRawTransaction(tx, false)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
@@ -1496,8 +1797,22 @@ func (w *Wallet) NewAddress(account uint32) (btcutil.Address, error) {
 	for i, addr := range addrs {
 		utilAddrs[i] = addr.Address()
 	}
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	if chainClient != nil {
+		err := chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	props, err := w.Manager.AccountProperties(account)
+	if err != nil {
+		log.Errorf("Cannot fetch account properties for notification "+
+			"after deriving next external address: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
 	}
 
 	return utilAddrs[0], nil
@@ -1517,8 +1832,12 @@ func (w *Wallet) NewChangeAddress(account uint32) (btcutil.Address, error) {
 		utilAddrs[i] = addr.Address()
 	}
 
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	chainClient, err := w.requireChainClient()
+	if err == nil {
+		err = chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return utilAddrs[0], nil
@@ -1629,6 +1948,11 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
 	minconf int32) (*wire.ShaHash, error) {
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create transaction, replying with an error if the creation
 	// was not successful.
 	createdTx, err := w.CreateSimpleTx(account, amounts, minconf)
@@ -1659,7 +1983,21 @@ func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
 
 	// TODO: The record already has the serialized tx, so no need to
 	// serialize it again.
-	return w.chainSvr.SendRawTransaction(&rec.MsgTx, false)
+	return chainClient.SendRawTransaction(&rec.MsgTx, false)
+}
+
+func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
+	server, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	_, err = server.SendRawTransaction(tx, false)
+	return err
+}
+
+func (w *Wallet) ChainParams() *chaincfg.Params {
+	return w.chainParams
 }
 
 // Open loads an already-created wallet from the passed database and namespaces.
@@ -1670,22 +2008,24 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, w
 	}
 	txMgr, err := wtxmgr.Open(wtxmgrNS)
 	if err != nil {
-		if !wtxmgr.IsNoExists(err) {
-			return nil, err
-		}
-		log.Info("No recorded transaction history -- needs full rescan")
-		err = addrMgr.SetSyncedTo(nil)
-		if err != nil {
-			return nil, err
-		}
-		txMgr, err = wtxmgr.Create(wtxmgrNS)
-		if err != nil {
+		if wtxmgr.IsNoExists(err) {
+			log.Info("No recorded transaction history -- needs full rescan")
+			err = addrMgr.SetSyncedTo(nil)
+			if err != nil {
+				return nil, err
+			}
+			txMgr, err = wtxmgr.Create(wtxmgrNS)
+			if err != nil {
+				return nil, err
+			}
+		} else {
 			return nil, err
 		}
 	}
 
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 	w := &Wallet{
+		publicPassphrase:    pubPass,
 		db:                  db,
 		Manager:             addrMgr,
 		TxStore:             txMgr,
@@ -1704,6 +2044,10 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, w
 		changePassphrase:    make(chan changePassphraseRequest),
 		chainParams:         params,
 		quit:                make(chan struct{}),
+	}
+	w.NtfnServer = newNotificationServer(w)
+	w.TxStore.NotifyUnspent = func(hash *wire.ShaHash, index uint32) {
+		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 	return w, nil
 }
