@@ -291,6 +291,48 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 	return newPk.SerializeUncompressed(), nil
 }
 
+func chainedPubKey2(pubkey, chaincode []byte) ([]byte, error) {
+	var compressed bool
+	switch n := len(pubkey); n {
+	case btcec.PubKeyBytesLenUncompressed:
+		compressed = false
+	case btcec.PubKeyBytesLenCompressed:
+		compressed = true
+	default:
+		// Incorrect serialized pubkey length
+		return nil, fmt.Errorf("invalid pubkey length %d", n)
+	}
+	if len(chaincode) != 32 {
+		return nil, fmt.Errorf("invalid chaincode length %d (must be 32)",
+			len(chaincode))
+	}
+
+	xorbytes := make([]byte, 32)
+	chainMod := fastsha256.Sum256(pubkey)
+	for i := range xorbytes {
+		xorbytes[i] = chainMod[i] ^ chaincode[i]
+	}
+
+	oldPk, err := btcec.ParsePubKey(pubkey, btcec.S256())
+	if err != nil {
+		return nil, err
+	}
+	newX, newY := btcec.S256().ScalarMult(oldPk.X, oldPk.Y, xorbytes)
+	if err != nil {
+		return nil, err
+	}
+	newPk := &btcec.PublicKey{
+		Curve: btcec.S256(),
+		X:     newX,
+		Y:     newY,
+	}
+
+	if compressed {
+		return newPk.SerializeCompressed(), nil
+	}
+	return newPk.SerializeUncompressed(), nil
+}
+
 type version struct {
 	major         byte
 	minor         byte
@@ -992,6 +1034,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 	}
 
 	// Print out the state of all chained addresses.
+	var bruteForce []int64
 	fmt.Println("\n\nStatus of all chained addresses:")
 	for i := int64(0); ; i++ {
 		addr, ok := s.chainedAddress(i)
@@ -999,16 +1042,98 @@ func (s *Store) Unlock(passphrase []byte) error {
 			fmt.Println()
 			break
 		}
+
 		privKey, err := addr.unlock(key)
 		if err != nil {
 			fmt.Printf("Chained address %d: unlock fails: %v\n", i, err)
+			bruteForce = append(bruteForce, i)
 			continue
 		}
 		if !pubKeyMatchesPrivKey(addr.pubKey, privKey) {
 			fmt.Printf("Chained address %d: unlocks, but privkey DOES NOT match pubkey.\n")
+			bruteForce = append(bruteForce, i)
 		} else {
 			fmt.Printf("Chained address %d: no errors.\n", i)
 		}
+	}
+
+	fmt.Printf("Attempting to brute force privkey derivation for %d keys\n", len(bruteForce))
+	numBruteForced := 0
+	for _, chainIndex := range bruteForce {
+		chainAddr, _ := s.chainedAddress(chainIndex)
+		chainAddrPubKey := chainAddr.pubKeyBytes()
+		var prevAddr *btcAddress
+		var canRecover bool
+		var useSingleSha256 bool
+		for i := chainIndex - 1; i >= -1; i-- {
+			// Derive pubkey for each ith address.
+			prevAddr, _ = s.chainedAddress(i)
+			prevAddrNextPubKey, err := chainedPubKey(prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+			if err != nil {
+				fmt.Printf("Error deriving next double-sha256 pubkey of address %d: %v\n", i, err)
+			} else {
+				if bytes.Equal(chainAddrPubKey, prevAddrNextPubKey) {
+					fmt.Printf("Address %d derived from %d using double-sha256\n", chainIndex, i)
+					canRecover = true
+					break
+				}
+			}
+			prevAddrNextPubKey, err = chainedPubKey2(prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+			if err != nil {
+				fmt.Printf("Error deriving next sha256 pubkey of address %d: %v\n", i, err)
+			} else {
+				if bytes.Equal(chainAddrPubKey, prevAddrNextPubKey) {
+					fmt.Printf("Address %d derived from %d using single-sha256\n", chainIndex, i)
+					canRecover = true
+					useSingleSha256 = true
+					break
+				} else if len(chainAddrPubKey) != len(prevAddrNextPubKey) {
+					fmt.Printf("Pubkey lengths do not match! Mismatch of compressed and uncompressed keys?\n")
+				}
+			}
+		}
+
+		if !canRecover {
+			fmt.Printf("Brute force for address %d failed: pubkey derived from unknown previous key\n", chainIndex)
+			continue
+		}
+
+		// Try recovery
+		var privKey []byte
+		prevAddrPrivKey, err := prevAddr.unlock(s.secret)
+		if err != nil {
+			fmt.Printf("Unlock failed for previous address that %d was derived from; cannot access privkey for recovery: %v\n", chainIndex, err)
+			continue
+		}
+		if !useSingleSha256 {
+			privKey, err = chainedPrivKey(prevAddrPrivKey, prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+		} else {
+			privKey, err = chainedPrivKey2(prevAddrPrivKey, prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+		}
+		if err != nil {
+			fmt.Printf("Error deriving privkey: %v\n", err)
+			continue
+		}
+
+		// Write the recovered privkey encrypted to the addr.
+		// Copypastad from createMissingPrivKeys.
+		chainAddr.privKeyCT = privKey
+		if err := chainAddr.encrypt(s.secret); err != nil {
+			// Avoid bug: see comment for VersUnsetNeedsPrivkeyFlag.
+			if err != ErrAlreadyEncrypted || s.vers.LT(VersUnsetNeedsPrivkeyFlag) {
+				fmt.Printf("Encrypt failed after successful privkey recovery: %v\n", err)
+				continue
+			}
+		}
+		chainAddr.flags.createPrivKeyNextUnlock = false
+
+		fmt.Printf("Recovered address %i privkey\n", chainIndex)
+		numBruteForced++
+	}
+
+	// If all keys were recovered then the unlock was successful.
+	if numBruteForced == len(bruteForce) {
+		retErr = nil
 	}
 
 	return retErr
@@ -1016,6 +1141,9 @@ func (s *Store) Unlock(passphrase []byte) error {
 
 // Access the chained btcAddress at index i.
 func (s *Store) chainedAddress(i int64) (*btcAddress, bool) {
+	if i == -1 {
+		return &s.keyGenerator, true
+	}
 	chainedAddr, ok := s.chainIdxMap[i]
 	if !ok {
 		return nil, false
@@ -1327,8 +1455,7 @@ func (s *Store) createMissingPrivateKeys() error {
 			fmt.Printf("Stopping privkey derivation at index %d, no more chained addresses\n", i)
 			break
 		}
-		priv, err := ithAddr.unlock(s.secret)
-		if err == nil {
+		if priv, err := ithAddr.unlock(s.secret); err == nil {
 			// No need to rederive this private key.
 			fmt.Printf("Address %d unlocks successfully and does not require recovery, skipping\n", i)
 			prevAddr = ithAddr
