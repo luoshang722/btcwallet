@@ -2722,9 +2722,11 @@ func (a *btcAddress) WriteTo(w io.Writer) (n int64, err error) {
 // failing if the address is already encrypted or if the private key is
 // not 32 bytes.  If successful, the encryption flag is set.
 func (a *btcAddress) encrypt(key []byte) error {
-	if a.flags.encrypted {
-		return ErrAlreadyEncrypted
-	}
+	/*
+		if a.flags.encrypted {
+			return ErrAlreadyEncrypted
+		}
+	*/
 	if len(a.privKeyCT) != 32 {
 		return errors.New("invalid clear text private key")
 	}
@@ -2762,6 +2764,13 @@ func (a *btcAddress) lock() error {
 func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	if !a.flags.encrypted {
 		return nil, errors.New("unable to unlock unencrypted address")
+	}
+
+	// This is a HACK, probably breaks tests too (or it should)
+	if len(a.privKeyCT) == 32 {
+		cpy := make([]byte, 32)
+		copy(cpy, a.privKeyCT)
+		return cpy, nil
 	}
 
 	// Decrypt private key with AES key.
