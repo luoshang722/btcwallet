@@ -1299,16 +1299,23 @@ func (s *Store) createMissingPrivateKeys() error {
 	}
 
 	for i := idx; ; i++ {
+		ithAddr, ok := s.chainedAddress(i)
+		if !ok {
+			break
+		}
+		priv, err := ithAddr.unlock(s.secret)
+		if err == nil {
+			// No need to rederive this private key.
+			prevAddr = ithAddr
+			prevPrivKey = priv
+			continue
+		}
+
 		// Get the next private key for the ith address in the address chain.
 		ithPrivKey, err := chainedPrivKey(prevPrivKey,
 			prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
 		if err != nil {
 			return err
-		}
-
-		ithAddr, ok := s.chainedAddress(i)
-		if !ok {
-			break
 		}
 
 		if !pubKeyMatchesPrivKey(ithAddr.pubKey, ithPrivKey) {
