@@ -969,12 +969,10 @@ func (s *Store) Unlock(passphrase []byte) error {
 		if err != nil {
 			if err == ErrWrongPassphrase {
 				fmt.Printf("Incorrect privkeys begin at index %d\n", i)
+				s.missingKeysStart = i
 				break
 			}
 			return err
-			//fmt.Printf("Unable to unlock chained address %v, index %d (%v), may need to regenerate privkey from a previous address\n", addr.address, i, err)
-		} else {
-			//fmt.Printf("Successfully unlocked address %v\n, index %v", addr.address, i)
 		}
 		zero(priv)
 	}
