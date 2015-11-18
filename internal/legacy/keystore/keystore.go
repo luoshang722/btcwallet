@@ -1327,8 +1327,13 @@ func (s *Store) createMissingPrivateKeys() error {
 
 			if !pubKeyMatchesPrivKey(ithAddr.pubKey, ithPrivKey) {
 				return fmt.Errorf("neither privkey derivation matches recorded pubkey "+
-					"(failed to recover addresses starting at index %d)", i)
+					"(failed to recover private key for address %v, index %v)",
+					ithAddr.address, i)
 			}
+
+			fmt.Printf("Successfully recovered private key for chained address %v (index %d) "+
+				"with single-sha256 privkey derivation\n",
+				ithAddr.address, i)
 		}
 
 		// Get the address with the missing private key, set, and
