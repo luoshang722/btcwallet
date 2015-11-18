@@ -1001,7 +1001,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 		}
 		privKey, err := addr.unlock(key)
 		if err != nil {
-			fmt.Printf("Chained address %d: unlock fails: %v", i, err)
+			fmt.Printf("Chained address %d: unlock fails: %v\n", i, err)
 			continue
 		}
 		if !pubKeyMatchesPrivKey(addr.pubKey, privKey) {
