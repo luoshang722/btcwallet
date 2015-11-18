@@ -953,7 +953,35 @@ func (s *Store) Unlock(passphrase []byte) error {
 	s.passphrase = passphrase
 	s.secret = key
 
-	return s.createMissingPrivateKeys()
+	err := s.createMissingPrivateKeys()
+	if err != nil {
+		return err
+	}
+
+	// Try to unlock every chained address.  This confirms that each pubkey
+	// matches the pubkey.
+	for i := int64(0); ; i++ {
+		chainedAddr, ok := s.chainIdxMap[i]
+		if !ok {
+			return nil
+		}
+		waddr, ok := s.addrMap[getAddressKey(chainedAddr)]
+		if !ok {
+			fmt.Printf("missing chainIdxmap address in addrMap, index %d\n", i)
+			continue
+		}
+		addr, ok := waddr.(*btcAddress)
+		if !ok {
+			return fmt.Errorf("wrong type %T in addrMap", waddr)
+		}
+		priv, err := addr.unlock(key)
+		if err != nil {
+			fmt.Printf("Unable to unlock chained address %v, index %d (%v), may need to regenerate privkey from a previous address\n", addr.address, i, err)
+		} else {
+			fmt.Printf("Successfully unlocked address %v\n, index %v", addr.address, i)
+		}
+		zero(priv)
+	}
 }
 
 // Lock performs a best try effort to remove and zero all secret keys
@@ -2488,11 +2516,8 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	}
 
 	if !pubKeyMatchesPrivKey(a.pubKey, privkey) {
-		fmt.Printf("Unable to unlock address %v, may need to regenerate privkey from a previous address\n", a.address)
 		return nil, ErrWrongPassphrase
 	}
-
-	fmt.Println("Successfully unlocked address", a.address)
 
 	privkeyCopy := make([]byte, 32)
 	copy(privkeyCopy, privkey)
