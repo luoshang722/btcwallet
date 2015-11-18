@@ -977,16 +977,41 @@ func (s *Store) Unlock(passphrase []byte) error {
 		zero(priv)
 	}
 
+	var retErr error
 	if s.missingKeysStart != rootKeyChainIdx {
 		// Begin key recovery.  Start the privkey derivation again at
 		// the earliest failed index, but this time if the derived
 		// privkey does not match the pubkey, the single sha256 version
 		// will be tried also.
 		fmt.Println("Beginning key recovery")
-		return s.createMissingPrivateKeys()
+		err = s.createMissingPrivateKeys()
+		if err != nil {
+			fmt.Printf("Error recovering privkeys: %v", err)
+			retErr = err
+		}
 	}
 
-	return nil
+	// Print out the state of all chained addresses.
+	fmt.Println("\n\nStatus of all chained addresses:")
+	for i := int64(0); ; i++ {
+		addr, ok := s.chainedAddress(i)
+		if !ok {
+			fmt.Println()
+			break
+		}
+		privKey, err := addr.unlock(key)
+		if err != nil {
+			fmt.Printf("Chained address %d: unlock fails: %v", i, err)
+			continue
+		}
+		if !pubKeyMatchesPrivKey(addr.pubKey, privKey) {
+			fmt.Printf("Chained address %d: unlocks, but privkey DOES NOT match pubkey.\n")
+		} else {
+			fmt.Printf("Chained address %d: no errors.\n", i)
+		}
+	}
+
+	return retErr
 }
 
 // Access the chained btcAddress at index i.
@@ -1299,7 +1324,7 @@ func (s *Store) createMissingPrivateKeys() error {
 	for i := idx; ; i++ {
 		ithAddr, ok := s.chainedAddress(i)
 		if !ok {
-			fmt.Printf("Stopping privkey derivation at index %d\n", i)
+			fmt.Printf("Stopping privkey derivation at index %d, no more chained addresses\n", i)
 			break
 		}
 		priv, err := ithAddr.unlock(s.secret)
@@ -2561,16 +2586,6 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	aesDecrypter := cipher.NewCFBDecrypter(aesBlockDecrypter, a.initVector[:])
 	privkey := make([]byte, 32)
 	aesDecrypter.XORKeyStream(privkey, a.privKey[:])
-
-	// If secret is already saved, simply compare the bytes.
-	if len(a.privKeyCT) == 32 {
-		if !bytes.Equal(a.privKeyCT, privkey) {
-			return nil, ErrWrongPassphrase
-		}
-		privKeyCT := make([]byte, 32)
-		copy(privKeyCT, a.privKeyCT)
-		return privKeyCT, nil
-	}
 
 	if !pubKeyMatchesPrivKey(a.pubKey, privkey) {
 		return nil, ErrWrongPassphrase
