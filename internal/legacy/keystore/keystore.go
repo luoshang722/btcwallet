@@ -958,30 +958,55 @@ func (s *Store) Unlock(passphrase []byte) error {
 		return err
 	}
 
-	// Try to unlock every chained address.  This confirms that each pubkey
+	// Try to unlock every chained address.  This confirms that each privkey
 	// matches the pubkey.
 	for i := int64(0); ; i++ {
-		chainedAddr, ok := s.chainIdxMap[i]
+		addr, ok := s.chainedAddress(i)
 		if !ok {
-			return nil
-		}
-		waddr, ok := s.addrMap[getAddressKey(chainedAddr)]
-		if !ok {
-			fmt.Printf("missing chainIdxmap address in addrMap, index %d\n", i)
-			continue
-		}
-		addr, ok := waddr.(*btcAddress)
-		if !ok {
-			return fmt.Errorf("wrong type %T in addrMap", waddr)
+			break
 		}
 		priv, err := addr.unlock(key)
 		if err != nil {
-			fmt.Printf("Unable to unlock chained address %v, index %d (%v), may need to regenerate privkey from a previous address\n", addr.address, i, err)
+			if err == ErrWrongPassphrase {
+				fmt.Printf("Incorrect privkeys begin at index %i\n", i)
+				break
+			}
+			return err
+			//fmt.Printf("Unable to unlock chained address %v, index %d (%v), may need to regenerate privkey from a previous address\n", addr.address, i, err)
 		} else {
-			fmt.Printf("Successfully unlocked address %v\n, index %v", addr.address, i)
+			//fmt.Printf("Successfully unlocked address %v\n, index %v", addr.address, i)
 		}
 		zero(priv)
 	}
+
+	if s.missingKeysStart != rootKeyChainIdx {
+		// Begin key recovery.  Start the privkey derivation again at
+		// the earliest failed index, but this time if the derived
+		// privkey does not match the pubkey, the single sha256 version
+		// will be tried also.
+		fmt.Println("Beginning key recovery")
+		return s.createMissingPrivateKeys()
+	}
+
+	return nil
+}
+
+// Access the chained btcAddress at index i.
+func (s *Store) chainedAddress(i int64) (*btcAddress, bool) {
+	chainedAddr, ok := s.chainIdxMap[i]
+	if !ok {
+		return nil, false
+	}
+	waddr, ok := s.addrMap[getAddressKey(chainedAddr)]
+	if !ok {
+		fmt.Printf("missing chainIdxmap address in addrMap, index %d\n", i)
+		return nil, false
+	}
+	addr, ok := waddr.(*btcAddress)
+	if !ok {
+		fmt.Printf("wrong type %T in addrMap\n", waddr)
+	}
+	return addr, ok
 }
 
 // Lock performs a best try effort to remove and zero all secret keys
@@ -1279,6 +1304,24 @@ func (s *Store) createMissingPrivateKeys() error {
 			prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
 		if err != nil {
 			return err
+		}
+
+		ithAddr, ok := s.chainedAddress(i)
+		if !ok {
+			break
+		}
+
+		if !pubKeyMatchesPrivKey(ithAddr.pubKey, ithPrivKey) {
+			// Try again using the single sha256 derivation.
+			ithPrivKey, err = chainedPrivKey2(prevPrivKey, prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+			if err != nil {
+				return err
+			}
+
+			if !pubKeyMatchesPrivKey(ithAddr.pubKey, ithPrivKey) {
+				return fmt.Errorf("neither privkey derivation matches recorded pubkey "+
+					"(failed to recover addresses starting at index %d)", i)
+			}
 		}
 
 		// Get the address with the missing private key, set, and
