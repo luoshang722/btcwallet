@@ -1142,7 +1142,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 			continue
 		}
 
-		if !pubKeyMatchesPrivKey(chainAddrPubKey, privKey) {
+		if !pubKeyMatchesPrivKey(chainAddr.pubKey, privKey) {
 			algo := "double-sha256"
 			if useSingleSha256 {
 				algo = "single-sha256"
