@@ -968,7 +968,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 		priv, err := addr.unlock(key)
 		if err != nil {
 			if err == ErrWrongPassphrase {
-				fmt.Printf("Incorrect privkeys begin at index %i\n", i)
+				fmt.Printf("Incorrect privkeys begin at index %d\n", i)
 				break
 			}
 			return err
