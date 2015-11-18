@@ -1158,7 +1158,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 		// Write the recovered privkey encrypted to the addr.
 		// Copypastad from createMissingPrivKeys.
 		chainAddr.privKeyCT = privKey
-		if err := chainAddr.encrypt(s.secret); err != nil {
+		if err := chainAddr.encrypt(key); err != nil {
 			// Avoid bug: see comment for VersUnsetNeedsPrivkeyFlag.
 			if err != ErrAlreadyEncrypted || s.vers.LT(VersUnsetNeedsPrivkeyFlag) {
 				fmt.Printf("Encrypt failed after successful privkey recovery: %v\n", err)
@@ -1169,6 +1169,25 @@ func (s *Store) Unlock(passphrase []byte) error {
 
 		fmt.Printf("Recovered address %d privkey\n", chainIndex)
 		numBruteForced++
+
+		fmt.Printf("Try using these WIFs for this recovered key:\n")
+		parsedPrivKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), privKey)
+		wif, err := btcutil.NewWIF(parsedPrivKey, &chaincfg.MainNetParams, false)
+		fmt.Printf("uncompressed: ")
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			addr, _ := btcutil.NewAddressPubKeyHash(btcutil.Hash160(wif.SerializePubKey()), &chaincfg.MainNetParams)
+			fmt.Printf("%v (for address %v)\n", wif, addr)
+		}
+		wif, err = btcutil.NewWIF(parsedPrivKey, &chaincfg.MainNetParams, true)
+		fmt.Printf("compressed: ")
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			addr, _ := btcutil.NewAddressPubKeyHash(btcutil.Hash160(wif.SerializePubKey()), &chaincfg.MainNetParams)
+			fmt.Printf("%v (for address %v)\n", wif, addr)
+		}
 	}
 
 	// If all keys were recovered then the unlock was successful.
