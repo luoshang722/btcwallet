@@ -1088,6 +1088,8 @@ func (s *Store) Unlock(passphrase []byte) error {
 	numBruteForced := 0
 	for _, chainIndex := range bruteForce {
 		chainAddr, _ := s.chainedAddress(chainIndex)
+		fmt.Printf("Brute forcing address %v, index %d\n", chainAddr.address, chainIndex)
+
 		chainAddrPubKey := chainAddr.pubKeyBytes()
 		var prevAddr *btcAddress
 		var canRecover bool
