@@ -1043,17 +1043,44 @@ func (s *Store) Unlock(passphrase []byte) error {
 			break
 		}
 
+		for j := i - 1; j >= -1; j-- {
+			// Derive pubkey for each jth address and compare to find the parent.
+			prevAddr, _ := s.chainedAddress(j)
+			prevAddrNextPubKey, err := chainedPubKey(prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+			if err != nil {
+				fmt.Printf("Error deriving next double-sha256 pubkey of address %d: %v\n", j, err)
+			} else {
+				if bytes.Equal(addr.pubKeyBytes(), prevAddrNextPubKey) {
+					fmt.Printf("Chained address %d, derived from %d using double-sha256: ", i, j)
+					break
+				} else if len(addr.pubKeyBytes()) != len(prevAddrNextPubKey) {
+					fmt.Printf("Pubkey lengths do not match! Mismatch of compressed and uncompressed keys?\n")
+				}
+			}
+			prevAddrNextPubKey, err = chainedPubKey2(prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
+			if err != nil {
+				fmt.Printf("Error deriving next sha256 pubkey of address %d: %v\n", j, err)
+			} else {
+				if bytes.Equal(addr.pubKeyBytes(), prevAddrNextPubKey) {
+					fmt.Printf("Chained address %d, derived from %d using single-sha256: ", i, j)
+					break
+				} else if len(addr.pubKeyBytes()) != len(prevAddrNextPubKey) {
+					fmt.Printf("Pubkey lengths do not match! Mismatch of compressed and uncompressed keys?\n")
+				}
+			}
+		}
+
 		privKey, err := addr.unlock(key)
 		if err != nil {
-			fmt.Printf("Chained address %d: unlock fails: %v\n", i, err)
+			fmt.Printf("unlock fails: %v\n", err)
 			bruteForce = append(bruteForce, i)
 			continue
 		}
 		if !pubKeyMatchesPrivKey(addr.pubKey, privKey) {
-			fmt.Printf("Chained address %d: unlocks, but privkey DOES NOT match pubkey.\n")
+			fmt.Printf("unlocks, but privkey DOES NOT match pubkey.\n")
 			bruteForce = append(bruteForce, i)
 		} else {
-			fmt.Printf("Chained address %d: no errors.\n", i)
+			fmt.Printf("no errors.\n")
 		}
 	}
 
@@ -1115,6 +1142,17 @@ func (s *Store) Unlock(passphrase []byte) error {
 			continue
 		}
 
+		if !pubKeyMatchesPrivKey(chainAddrPubKey, privKey) {
+			algo := "double-sha256"
+			if useSingleSha256 {
+				algo = "single-sha256"
+			}
+			fmt.Printf("Pubkey derivation for address %d succeeded using %s, "+
+				"but derived private key does not match pubkey",
+				chainIndex, algo)
+			continue
+		}
+
 		// Write the recovered privkey encrypted to the addr.
 		// Copypastad from createMissingPrivKeys.
 		chainAddr.privKeyCT = privKey
@@ -1127,7 +1165,7 @@ func (s *Store) Unlock(passphrase []byte) error {
 		}
 		chainAddr.flags.createPrivKeyNextUnlock = false
 
-		fmt.Printf("Recovered address %i privkey\n", chainIndex)
+		fmt.Printf("Recovered address %d privkey\n", chainIndex)
 		numBruteForced++
 	}
 
