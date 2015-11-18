@@ -1299,11 +1299,13 @@ func (s *Store) createMissingPrivateKeys() error {
 	for i := idx; ; i++ {
 		ithAddr, ok := s.chainedAddress(i)
 		if !ok {
+			fmt.Printf("Stopping privkey derivation at index %d\n", i)
 			break
 		}
 		priv, err := ithAddr.unlock(s.secret)
 		if err == nil {
 			// No need to rederive this private key.
+			fmt.Printf("Address %d unlocks successfully and does not require recovery, skipping\n", i)
 			prevAddr = ithAddr
 			prevPrivKey = priv
 			continue
@@ -1317,6 +1319,8 @@ func (s *Store) createMissingPrivateKeys() error {
 		}
 
 		if !pubKeyMatchesPrivKey(ithAddr.pubKey, ithPrivKey) {
+			fmt.Printf("Trying key recovery for address index %d with single-sha256 derivation\n", i)
+
 			// Try again using the single sha256 derivation.
 			ithPrivKey, err = chainedPrivKey2(prevPrivKey, prevAddr.pubKeyBytes(), prevAddr.chaincode[:])
 			if err != nil {
