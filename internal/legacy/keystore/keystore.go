@@ -40,6 +40,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/rename"
+	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/golangcrypto/ripemd160"
 )
 
@@ -202,6 +203,38 @@ func chainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 
 	xorbytes := make([]byte, 32)
 	chainMod := wire.DoubleSha256(pubkey)
+	for i := range xorbytes {
+		xorbytes[i] = chainMod[i] ^ chaincode[i]
+	}
+	chainXor := new(big.Int).SetBytes(xorbytes)
+	privint := new(big.Int).SetBytes(privkey)
+
+	t := new(big.Int).Mul(chainXor, privint)
+	b := t.Mod(t, btcec.S256().N).Bytes()
+	return pad(32, b), nil
+}
+
+// Slightly different version of chainedPrivKey that replaces double sha256 with
+// a single sha256.  This was incorrectly introduced in an earlier version and
+// exists here for recovery purposes.
+func chainedPrivKey2(privkey, pubkey, chaincode []byte) ([]byte, error) {
+	if len(privkey) != 32 {
+		return nil, fmt.Errorf("invalid privkey length %d (must be 32)",
+			len(privkey))
+	}
+	if len(chaincode) != 32 {
+		return nil, fmt.Errorf("invalid chaincode length %d (must be 32)",
+			len(chaincode))
+	}
+	switch n := len(pubkey); n {
+	case btcec.PubKeyBytesLenUncompressed, btcec.PubKeyBytesLenCompressed:
+		// Correct length
+	default:
+		return nil, fmt.Errorf("invalid pubkey length %d", n)
+	}
+
+	xorbytes := make([]byte, 32)
+	chainMod := fastsha256.Sum256(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -2454,15 +2487,22 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 		return privKeyCT, nil
 	}
 
-	x, y := btcec.S256().ScalarBaseMult(privkey)
-	if x.Cmp(a.pubKey.X) != 0 || y.Cmp(a.pubKey.Y) != 0 {
+	if !pubKeyMatchesPrivKey(a.pubKey, privkey) {
+		fmt.Printf("Unable to unlock address %v, may need to regenerate privkey from a previous address\n", a.address)
 		return nil, ErrWrongPassphrase
 	}
+
+	fmt.Println("Successfully unlocked address", a.address)
 
 	privkeyCopy := make([]byte, 32)
 	copy(privkeyCopy, privkey)
 	a.privKeyCT = privkey
 	return privkeyCopy, nil
+}
+
+func pubKeyMatchesPrivKey(pubKey *btcec.PublicKey, privKey []byte) bool {
+	x, y := btcec.S256().ScalarBaseMult(privKey)
+	return x.Cmp(pubKey.X) == 0 && y.Cmp(pubKey.Y) == 0
 }
 
 // changeEncryptionKey re-encrypts the private keys for an address
