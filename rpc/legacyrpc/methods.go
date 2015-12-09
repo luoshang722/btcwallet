@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2013-2016 The btcsuite developers
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 package legacyrpc
 
 import (
@@ -156,13 +172,6 @@ func Unsupported(interface{}, *wallet.Wallet) (interface{}, error) {
 		Message: "Request unsupported by btcwallet",
 	}
 }
-
-// TODO(jrick): may be a good idea to add handlers for passthrough to the chain
-// server.  If a handler can not be looked up in one of the above maps, use this
-// passthrough handler instead.  This isn't done at the moment since all
-// requests are executed serialized, and blocking all requests, and even just
-// requests from the same client, on the result of a btcd RPC can result is too
-// much waiting for the round trip.
 
 // lazyHandler is a closure over a requestHandler or passthrough request with
 // the RPC server's wallet and chain server variables as part of the closure
@@ -451,16 +460,20 @@ func GetBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 	if accountName == "*" {
 		balance, err = w.CalculateBalance(int32(*cmd.MinConf))
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		var account uint32
 		account, err = w.Manager.LookupAccount(accountName)
 		if err != nil {
 			return nil, err
 		}
-		balance, err = w.CalculateAccountBalance(account, int32(*cmd.MinConf))
-	}
-	if err != nil {
-		return nil, err
+		bals, err := w.CalculateAccountBalances(account, int32(*cmd.MinConf))
+		if err != nil {
+			return nil, err
+		}
+		balance = bals.Spendable
 	}
 	return balance.ToBTC(), nil
 }
@@ -596,16 +609,12 @@ func GetUnconfirmedBalance(icmd interface{}, w *wallet.Wallet) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	unconfirmed, err := w.CalculateAccountBalance(account, 0)
-	if err != nil {
-		return nil, err
-	}
-	confirmed, err := w.CalculateAccountBalance(account, 1)
+	bals, err := w.CalculateAccountBalances(account, 1)
 	if err != nil {
 		return nil, err
 	}
 
-	return (unconfirmed - confirmed).ToBTC(), nil
+	return (bals.Total - bals.Spendable).ToBTC(), nil
 }
 
 // ImportPrivKey handles an importprivkey request by parsing
@@ -940,16 +949,23 @@ func GetTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // separated by newlines.  It is set during init.  These usages are used for all
 // locales.
 //
-//go:generate go run ../internal/rpchelp/genrpcserverhelp.go legacyrpc
+//go:generate go run ../../internal/rpchelp/genrpcserverhelp.go legacyrpc
 //go:generate gofmt -w rpcserverhelp.go
 
 var helpDescs map[string]string
 var helpDescsMu sync.Mutex // Help may execute concurrently, so synchronize access.
 
+// HelpWithChainRPC handles the help request when the RPC server has been
+// associated with a consensus RPC client.  The additional RPC client is used to
+// include help messages for methods implemented by the consensus server via RPC
+// passthrough.
 func HelpWithChainRPC(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	return help(icmd, w, chainClient)
 }
 
+// HelpNoChainRPC handles the help request when the RPC server has not been
+// associated with a consensus RPC client.  No help messages are included for
+// passthrough requests.
 func HelpNoChainRPC(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	return help(icmd, w, nil)
 }
@@ -1058,11 +1074,11 @@ func ListAccounts(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		if err != nil {
 			return nil, &ErrAccountNameNotFound
 		}
-		bal, err := w.CalculateAccountBalance(account, minConf)
+		bals, err := w.CalculateAccountBalances(account, minConf)
 		if err != nil {
 			return nil, err
 		}
-		accountBalances[acctName] = bal.ToBTC()
+		accountBalances[acctName] = bals.Spendable.ToBTC()
 	}
 	// Return the map.  This will be marshaled into a JSON object.
 	return accountBalances, nil
@@ -1593,16 +1609,34 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	if err != nil {
 		return nil, err
 	}
-	msgTx := wire.NewMsgTx()
-	err = msgTx.Deserialize(bytes.NewBuffer(serializedTx))
+	tx := wire.NewMsgTx()
+	err = tx.Deserialize(bytes.NewBuffer(serializedTx))
 	if err != nil {
 		e := errors.New("TX decode failed")
 		return nil, DeserializationError{e}
 	}
 
-	// First we add the stuff we have been given.
-	// TODO(oga) really we probably should look these up with btcd anyway
-	// to make sure that they match the blockchain if present.
+	var hashType txscript.SigHashType
+	switch *cmd.Flags {
+	case "ALL":
+		hashType = txscript.SigHashAll
+	case "NONE":
+		hashType = txscript.SigHashNone
+	case "SINGLE":
+		hashType = txscript.SigHashSingle
+	case "ALL|ANYONECANPAY":
+		hashType = txscript.SigHashAll | txscript.SigHashAnyOneCanPay
+	case "NONE|ANYONECANPAY":
+		hashType = txscript.SigHashNone | txscript.SigHashAnyOneCanPay
+	case "SINGLE|ANYONECANPAY":
+		hashType = txscript.SigHashSingle | txscript.SigHashAnyOneCanPay
+	default:
+		e := errors.New("Invalid sighash parameter")
+		return nil, InvalidParameterError{e}
+	}
+
+	// TODO: really we probably should look these up with btcd anyway to
+	// make sure that they match the blockchain if present.
 	inputs := make(map[wire.OutPoint][]byte)
 	scripts := make(map[string][]byte)
 	var cmdInputs []btcjson.RawTxInput
@@ -1650,7 +1684,7 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// requests and will wait for replies after we have checked the rest of
 	// the arguments.
 	requested := make(map[wire.ShaHash]*pendingTx)
-	for _, txIn := range msgTx.TxIn {
+	for _, txIn := range tx.TxIn {
 		// Did we get this txin from the arguments?
 		if _, ok := inputs[txIn.PreviousOutPoint]; ok {
 			continue
@@ -1702,29 +1736,9 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		}
 	}
 
-	var hashType txscript.SigHashType
-	switch *cmd.Flags {
-	case "ALL":
-		hashType = txscript.SigHashAll
-	case "NONE":
-		hashType = txscript.SigHashNone
-	case "SINGLE":
-		hashType = txscript.SigHashSingle
-	case "ALL|ANYONECANPAY":
-		hashType = txscript.SigHashAll | txscript.SigHashAnyOneCanPay
-	case "NONE|ANYONECANPAY":
-		hashType = txscript.SigHashNone | txscript.SigHashAnyOneCanPay
-	case "SINGLE|ANYONECANPAY":
-		hashType = txscript.SigHashSingle | txscript.SigHashAnyOneCanPay
-	default:
-		e := errors.New("Invalid sighash parameter")
-		return nil, InvalidParameterError{e}
-	}
-
 	// We have checked the rest of the args. now we can collect the async
-	// txs. TODO(oga) If we don't mind the possibility of wasting work we
-	// could move waiting to the following loop and be slightly more
-	// asynchronous.
+	// txs. TODO: If we don't mind the possibility of wasting work we could
+	// move waiting to the following loop and be slightly more asynchronous.
 	for txid, ptx := range requested {
 		tx, err := ptx.resp.Receive()
 		if err != nil {
@@ -1749,124 +1763,30 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// `complete' denotes that we successfully signed all outputs and that
 	// all scripts will run to completion. This is returned as part of the
 	// reply.
-	var signErrors []btcjson.SignRawTransactionError
-	for i, txIn := range msgTx.TxIn {
-		input, ok := inputs[txIn.PreviousOutPoint]
-		if !ok {
-			// failure to find previous is actually an error since
-			// we failed above if we don't have all the inputs.
-			return nil, fmt.Errorf("%s:%d not found",
-				txIn.PreviousOutPoint.Hash,
-				txIn.PreviousOutPoint.Index)
-		}
-
-		// Set up our callbacks that we pass to txscript so it can
-		// look up the appropriate keys and scripts by address.
-		getKey := txscript.KeyClosure(func(addr btcutil.Address) (
-			*btcec.PrivateKey, bool, error) {
-			if len(keys) != 0 {
-				wif, ok := keys[addr.EncodeAddress()]
-				if !ok {
-					return nil, false,
-						errors.New("no key for address")
-				}
-				return wif.PrivKey, wif.CompressPubKey, nil
-			}
-			address, err := w.Manager.Address(addr)
-			if err != nil {
-				return nil, false, err
-			}
-
-			pka, ok := address.(waddrmgr.ManagedPubKeyAddress)
-			if !ok {
-				return nil, false, errors.New("address is not " +
-					"a pubkey address")
-			}
-
-			key, err := pka.PrivKey()
-			if err != nil {
-				return nil, false, err
-			}
-
-			return key, pka.Compressed(), nil
-		})
-
-		getScript := txscript.ScriptClosure(func(
-			addr btcutil.Address) ([]byte, error) {
-			// If keys were provided then we can only use the
-			// scripts provided with our inputs, too.
-			if len(keys) != 0 {
-				script, ok := scripts[addr.EncodeAddress()]
-				if !ok {
-					return nil, errors.New("no script for " +
-						"address")
-				}
-				return script, nil
-			}
-			address, err := w.Manager.Address(addr)
-			if err != nil {
-				return nil, err
-			}
-			sa, ok := address.(waddrmgr.ManagedScriptAddress)
-			if !ok {
-				return nil, errors.New("address is not a script" +
-					" address")
-			}
-
-			return sa.Script()
-		})
-
-		// SigHashSingle inputs can only be signed if there's a
-		// corresponding output. However this could be already signed,
-		// so we always verify the output.
-		if (hashType&txscript.SigHashSingle) !=
-			txscript.SigHashSingle || i < len(msgTx.TxOut) {
-
-			script, err := txscript.SignTxOutput(w.ChainParams(),
-				msgTx, i, input, hashType, getKey,
-				getScript, txIn.SignatureScript)
-			// Failure to sign isn't an error, it just means that
-			// the tx isn't complete.
-			if err != nil {
-				signErrors = append(signErrors,
-					btcjson.SignRawTransactionError{
-						TxID:      txIn.PreviousOutPoint.Hash.String(),
-						Vout:      txIn.PreviousOutPoint.Index,
-						ScriptSig: hex.EncodeToString(txIn.SignatureScript),
-						Sequence:  txIn.Sequence,
-						Error:     err.Error(),
-					})
-				continue
-			}
-			txIn.SignatureScript = script
-		}
-
-		// Either it was already signed or we just signed it.
-		// Find out if it is completely satisfied or still needs more.
-		vm, err := txscript.NewEngine(input, msgTx, i,
-			txscript.StandardVerifyFlags, nil)
-		if err == nil {
-			err = vm.Execute()
-		}
-		if err != nil {
-			signErrors = append(signErrors,
-				btcjson.SignRawTransactionError{
-					TxID:      txIn.PreviousOutPoint.Hash.String(),
-					Vout:      txIn.PreviousOutPoint.Index,
-					ScriptSig: hex.EncodeToString(txIn.SignatureScript),
-					Sequence:  txIn.Sequence,
-					Error:     err.Error(),
-				})
-		}
+	signErrs, err := w.SignTransaction(tx, hashType, inputs, keys, scripts)
+	if err != nil {
+		return nil, err
 	}
 
 	var buf bytes.Buffer
-	buf.Grow(msgTx.SerializeSize())
+	buf.Grow(tx.SerializeSize())
 
 	// All returned errors (not OOM, which panics) encounted during
 	// bytes.Buffer writes are unexpected.
-	if err = msgTx.Serialize(&buf); err != nil {
+	if err = tx.Serialize(&buf); err != nil {
 		panic(err)
+	}
+
+	signErrors := make([]btcjson.SignRawTransactionError, 0, len(signErrs))
+	for _, e := range signErrs {
+		input := tx.TxIn[e.InputIndex]
+		signErrors = append(signErrors, btcjson.SignRawTransactionError{
+			TxID:      input.PreviousOutPoint.Hash.String(),
+			Vout:      input.PreviousOutPoint.Index,
+			ScriptSig: hex.EncodeToString(input.SignatureScript),
+			Sequence:  input.Sequence,
+			Error:     e.Error.Error(),
+		})
 	}
 
 	return btcjson.SignRawTransactionResult{

@@ -328,7 +328,24 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 	s.currentTxNtfn = nil
 }
 
-// TODO: needs better name.
+// TransactionNotifications is a notification of changes to the wallet's
+// transaction set and the current chain tip that wallet is considered to be
+// synced with.  All transactions added to the blockchain are organized by the
+// block they were mined in.
+//
+// During a chain switch, all removed block hashes are included.  Detached
+// blocks are sorted in the reverse order they were mined.  Attached blocks are
+// sorted in the order mined.
+//
+// All newly added unmined transactions are included.  Removed unmined
+// transactions are not explicitly included.  Instead, the hashes of all
+// transactions still unmined are included.
+//
+// If any transactions were involved, each affected account's new total balance
+// is included.
+//
+// TODO: Because this includes stuff about blocks and can be fired without any
+// changes to transactions, it needs a better name.
 type TransactionNotifications struct {
 	AttachedBlocks           []Block
 	DetachedBlocks           []*wire.ShaHash
@@ -337,6 +354,8 @@ type TransactionNotifications struct {
 	NewBalances              []AccountBalance
 }
 
+// Block contains the properties and all relevant transactions of an attached
+// block.
 type Block struct {
 	Hash         *wire.ShaHash
 	Height       int32
@@ -344,6 +363,8 @@ type Block struct {
 	Transactions []TransactionSummary
 }
 
+// TransactionSummary contains a transaction relevant to the wallet and marks
+// which inputs and outputs were relevant.
 type TransactionSummary struct {
 	Hash        *wire.ShaHash
 	Transaction []byte
@@ -353,12 +374,22 @@ type TransactionSummary struct {
 	Timestamp   int64
 }
 
+// TransactionSummaryInput describes a transaction input that is relevant to the
+// wallet.  The Index field marks the transaction input index of the transaction
+// (not included here).  The PreviousAccount and PreviousAmount fields describe
+// how much this input debits from a wallet account.
 type TransactionSummaryInput struct {
 	Index           uint32
 	PreviousAccount uint32
 	PreviousAmount  btcutil.Amount
 }
 
+// TransactionSummaryOutput describes a transaction output of a relevant
+// transaction.  When the transaction is authored by this wallet, all
+// transaction outputs are considered relevant.  The Mine field describes
+// whether outputs to these authored transactions pay back to the wallet
+// (e.g. change) or create an uncontrolled output.  For convenience, the
+// addresses (if any) of an uncontrolled output are included.
 type TransactionSummaryOutput struct {
 	Index  uint32
 	Amount btcutil.Amount
@@ -372,16 +403,28 @@ type TransactionSummaryOutput struct {
 	Addresses []btcutil.Address
 }
 
+// AccountBalance associates a total (zero confirmation) balance with an
+// account.  Balances for other minimum confirmation counts require more
+// expensive logic and it is not clear which minimums a client is interested in,
+// so they are not included.
 type AccountBalance struct {
 	Account      uint32
 	TotalBalance btcutil.Amount
 }
 
+// TransactionNotificationsClient receives TransactionNotifications from the
+// NotificationServer over the channel C.
 type TransactionNotificationsClient struct {
 	C      <-chan *TransactionNotifications
 	server *NotificationServer
 }
 
+// TransactionNotifications returns a client for receiving
+// TransactionNotifiations notifications over a channel.  The channel is
+// unbuffered.
+//
+// When finished, the Done method should be called on the client to disassociate
+// it from the server.
 func (s *NotificationServer) TransactionNotifications() TransactionNotificationsClient {
 	c := make(chan *TransactionNotifications)
 	s.mu.Lock()
@@ -419,12 +462,11 @@ func (c *TransactionNotificationsClient) Done() {
 	}()
 }
 
-type SpentnessNotificationsClient struct {
-	C       <-chan *SpentnessNotifications
-	account uint32
-	server  *NotificationServer
-}
-
+// SpentnessNotifications is a notification that is fired for transaction
+// outputs controlled by some account's keys.  The notification may be about a
+// newly added unspent transaction output or that a previously unspent output is
+// now spent.  When spent, the notification includes the spending transaction's
+// hash and input index.
 type SpentnessNotifications struct {
 	hash         *wire.ShaHash
 	spenderHash  *wire.ShaHash
@@ -432,14 +474,18 @@ type SpentnessNotifications struct {
 	spenderIndex uint32
 }
 
+// Hash returns the transaction hash of the spent output.
 func (n *SpentnessNotifications) Hash() *wire.ShaHash {
 	return n.hash
 }
 
+// Index returns the transaction output index of the spent output.
 func (n *SpentnessNotifications) Index() uint32 {
 	return n.index
 }
 
+// Spender returns the spending transction's hash and input index, if any.  If
+// the output is unspent, the final bool return is false.
 func (n *SpentnessNotifications) Spender() (*wire.ShaHash, uint32, bool) {
 	return n.spenderHash, n.spenderIndex, n.spenderHash != nil
 }
@@ -483,6 +529,28 @@ func (s *NotificationServer) notifySpentOutput(account uint32, op *wire.OutPoint
 	}
 }
 
+// SpentnessNotificationsClient receives SpentnessNotifications from the
+// NotificationServer over the channel C.
+type SpentnessNotificationsClient struct {
+	C       <-chan *SpentnessNotifications
+	account uint32
+	server  *NotificationServer
+}
+
+// AccountSpentnessNotifications registers a client for spentness changes of
+// outputs controlled by the account.
+func (s *NotificationServer) AccountSpentnessNotifications(account uint32) SpentnessNotificationsClient {
+	c := make(chan *SpentnessNotifications)
+	s.mu.Lock()
+	s.spentness[account] = append(s.spentness[account], c)
+	s.mu.Unlock()
+	return SpentnessNotificationsClient{
+		C:       c,
+		account: account,
+		server:  s,
+	}
+}
+
 // Done deregisters the client from the server and drains any remaining
 // messages.  It must be called exactly once when the client is finished
 // receiving notifications.
@@ -509,62 +577,15 @@ func (c *SpentnessNotificationsClient) Done() {
 	}()
 }
 
-// AccountSpendnessNotifications registers a client for changes of spentness of wallet outputs.
-func (s *NotificationServer) AccountSpentnessNotifications(account uint32) SpentnessNotificationsClient {
-	c := make(chan *SpentnessNotifications)
-	s.mu.Lock()
-	s.spentness[account] = append(s.spentness[account], c)
-	s.mu.Unlock()
-	return SpentnessNotificationsClient{
-		C:       c,
-		account: account,
-		server:  s,
-	}
-}
-
+// AccountNotification contains properties regarding an account, such as its
+// name and the number of derived and imported keys.  When any of these
+// properties change, the notification is fired.
 type AccountNotification struct {
 	AccountNumber    uint32
 	AccountName      string
 	ExternalKeyCount uint32
 	InternalKeyCount uint32
 	ImportedKeyCount uint32
-}
-
-type AccountNotificationsClient struct {
-	C      chan *AccountNotification
-	server *NotificationServer
-}
-
-func (c *AccountNotificationsClient) Done() {
-	go func() {
-		for range c.C {
-		}
-	}()
-	go func() {
-		s := c.server
-		s.mu.Lock()
-		clients := s.accountClients
-		for i, ch := range clients {
-			if c.C == ch {
-				clients[i] = clients[len(clients)-1]
-				s.accountClients = clients[:len(clients)-1]
-				close(ch)
-				break
-			}
-		}
-		s.mu.Unlock()
-	}()
-}
-
-func (s *NotificationServer) AccountNotifications() AccountNotificationsClient {
-	c := make(chan *AccountNotification)
-	s.mu.Lock()
-	s.accountClients = append(s.accountClients, c)
-	s.mu.Unlock()
-	return AccountNotificationsClient{
-		C:      c,
-		server: s,
-	}
 }
 
 func (s *NotificationServer) notifyAccountProperties(props *waddrmgr.AccountProperties) {
@@ -584,4 +605,48 @@ func (s *NotificationServer) notifyAccountProperties(props *waddrmgr.AccountProp
 	for _, c := range clients {
 		c <- n
 	}
+}
+
+// AccountNotificationsClient receives AccountNotifications over the channel C.
+type AccountNotificationsClient struct {
+	C      chan *AccountNotification
+	server *NotificationServer
+}
+
+// AccountNotifications returns a client for receiving AccountNotifications over
+// a channel.  The channel is unbuffered.  When finished, the client's Done
+// method should be called to disassociate the client from the server.
+func (s *NotificationServer) AccountNotifications() AccountNotificationsClient {
+	c := make(chan *AccountNotification)
+	s.mu.Lock()
+	s.accountClients = append(s.accountClients, c)
+	s.mu.Unlock()
+	return AccountNotificationsClient{
+		C:      c,
+		server: s,
+	}
+}
+
+// Done deregisters the client from the server and drains any remaining
+// messages.  It must be called exactly once when the client is finished
+// receiving notifications.
+func (c *AccountNotificationsClient) Done() {
+	go func() {
+		for range c.C {
+		}
+	}()
+	go func() {
+		s := c.server
+		s.mu.Lock()
+		clients := s.accountClients
+		for i, ch := range clients {
+			if c.C == ch {
+				clients[i] = clients[len(clients)-1]
+				s.accountClients = clients[:len(clients)-1]
+				close(ch)
+				break
+			}
+		}
+		s.mu.Unlock()
+	}()
 }

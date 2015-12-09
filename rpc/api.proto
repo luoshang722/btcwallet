@@ -9,7 +9,6 @@ service WalletService {
 	rpc AccountNumber (AccountNumberRequest) returns (AccountNumberResponse);
 	rpc Accounts (AccountsRequest) returns (AccountsResponse);
 	rpc Balance (BalanceRequest) returns (BalanceResponse);
-	rpc SelectUnspentOutputs (SelectUnspentOutputsRequest) returns (SelectUnspentOutputsResponse);
 	rpc GetTransactions (GetTransactionsRequest) returns (GetTransactionsResponse);
 
 	// Notifications
@@ -18,22 +17,21 @@ service WalletService {
 	rpc AccountNotifications (AccountNotificationsRequest) returns (stream AccountNotificationsResponse);
 
 	// Control
-	// TODO: unlock public encryption (needs a wallet refactor, currently prompts from stdin at startup)
 	rpc ChangePassphrase (ChangePassphraseRequest) returns (ChangePassphraseResponse);
 	rpc RenameAccount (RenameAccountRequest) returns (RenameAccountResponse);
 	rpc NextAccount (NextAccountRequest) returns (NextAccountResponse);
 	rpc NextAddress (NextAddressRequest) returns (NextAddressResponse);
 	rpc ImportPrivateKey (ImportPrivateKeyRequest) returns (ImportPrivateKeyResponse);
-	rpc CreateSignedTransaction (CreateSignedTransactionRequest) returns (CreateSignedTransactionResponse);
+	rpc FundTransaction (FundTransactionRequest) returns (FundTransactionResponse);
 	rpc SignTransaction (SignTransactionRequest) returns (SignTransactionResponse);
 	rpc PublishTransaction (PublishTransactionRequest) returns (PublishTransactionResponse);
 }
 
 service WalletLoaderService {
+	rpc WalletExists (WalletExistsRequest) returns (WalletExistsResponse);
 	rpc CreateWallet (CreateWalletRequest) returns (CreateWalletResponse);
 	rpc OpenWallet (OpenWalletRequest) returns (OpenWalletResponse);
 	rpc CloseWallet (CloseWalletRequest) returns (CloseWalletResponse);
-	rpc WalletExists (WalletExistsRequest) returns (WalletExistsResponse);
 	rpc StartBtcdRpc (StartBtcdRpcRequest) returns (StartBtcdRpcResponse);
 }
 
@@ -44,8 +42,6 @@ message TransactionDetails {
 		int64 previous_amount = 3;
 	}
 	message Output {
-		uint32 index = 1;
-		int64 amount = 2;
 		bool mine = 3;
 
 		// These fields only relevant if mine==true.
@@ -165,6 +161,8 @@ message GetTransactionsRequest {
 	
 	// Include at least this many of the newest transactions if they exist.
 	// Cannot be used when the ending block hash is specified.
+	//
+	// TODO: remove until spec adds it back in some way.
 	int32 minimum_recent_transactions = 5;
 
 	// TODO: limit max number of txs?
@@ -185,14 +183,15 @@ message ChangePassphraseRequest {
 }
 message ChangePassphraseResponse {}
 
-message SelectUnspentOutputsRequest {
+message FundTransactionRequest {
 	uint32 account = 1;
 	int64 target_amount = 2;
 	int32 required_confirmations = 3;
 	bool include_immature_coinbases = 4;
+	bool include_change_script = 5;
 }
-message SelectUnspentOutputsResponse {
-	message Output {
+message FundTransactionResponse {
+	message PreviousOutput {
 		bytes transaction_hash = 1;
 		uint32 output_index = 2;
 		int64 amount = 3;
@@ -200,14 +199,15 @@ message SelectUnspentOutputsResponse {
 		int64 receive_time = 5;
 		bool from_coinbase = 6;
 	}
-	repeated Output outputs = 1;
+	repeated PreviousOutput selected_outputs = 1;
 	int64 total_amount = 2;
+	bytes change_pk_script = 3;
 }
 
 message SignTransactionRequest {
 	bytes passphrase = 1;
 	
-	bytes transaction = 2;
+	bytes serialized_transaction = 2;
 
 	// If no indexes are specified, signatures scripts will be added for
 	// every input. If any input indexes are specified, only those inputs
@@ -218,22 +218,7 @@ message SignTransactionRequest {
 }
 message SignTransactionResponse {
 	bytes transaction = 1;
-}
-
-message CreateSignedTransactionRequest {
-	bytes passphrase = 1;
-	uint32 account = 2;
-	int32 required_confirmations = 3;
-	message Output {
-		int64 amount = 1;
-		bytes pk_script = 2;
-	}
-	repeated Output outputs = 4;
-	bool randomize_output_order = 5;
-}
-message CreateSignedTransactionResponse {
-	bytes transaction = 1;
-	int64 fee = 2;
+	repeated uint32 unsigned_input_indexes = 2;
 }
 
 message PublishTransactionRequest {
@@ -262,10 +247,6 @@ message TransactionNotificationsResponse {
 	// Instead of notifying all of the removed unmined transactions,
 	// just send all of the current hashes.
 	repeated bytes unmined_transaction_hashes = 4;
-
-	// Total balances for every affected account.  If an account is
-	// not included here, the previous balance did not change.
-	repeated AccountBalance new_balances = 5;
 }
 
 message SpentnessNotificationsRequest {
@@ -275,11 +256,11 @@ message SpentnessNotificationsRequest {
 }
 
 message SpentnessNotificationsResponse {
-	bytes hash = 1;
-	uint32 index = 2;
+	bytes transaction_hash = 1;
+	uint32 output_index = 2;
 	message Spender {
-		bytes hash = 1;
-		uint32 index = 2;
+		bytes transaction_hash = 1;
+		uint32 input_index = 2;
 	}
 	Spender spender = 3;
 }

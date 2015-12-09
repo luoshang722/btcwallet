@@ -193,7 +193,7 @@ func createWallet(cfg *config) error {
 	// specified by the user or the default hard-coded public passphrase if
 	// the user does not want the additional public data encryption.
 	pubPass, err := prompt.PublicPass(reader, privPass,
-		[]byte(wallet.DefaultPubPassphrase), []byte(cfg.WalletPass))
+		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func createSimulationWallet(cfg *config) error {
 	privPass := []byte("password")
 
 	// Public passphrase is the default.
-	pubPass := []byte(wallet.DefaultPubPassphrase)
+	pubPass := []byte(wallet.InsecurePubPassphrase)
 
 	// Generate a random seed.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)

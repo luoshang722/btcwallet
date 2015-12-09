@@ -19,71 +19,16 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
-
-	"google.golang.org/grpc/grpclog"
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
+	"github.com/btcsuite/btcwallet/rpc/rpcserver"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
-
-// grpcLogger implements the grpclog.Logger interface so btclog backends may be
-// used by the grpc server.
-type grpcLogger struct {
-	btclog.Logger
-}
-
-// stripGrpcPrefix removes the package prefix for all logs made to the grpc
-// logger, since these are already included as the btclog subsystem name.
-func stripGrpcPrefix(logstr string) string {
-	return strings.TrimPrefix(logstr, "grpc: ")
-}
-
-// stripGrpcPrefixArgs removes the package prefix from the first argument, if it
-// exists and is a string, returning the same arg slice after reassigning the
-// first arg.
-func stripGrpcPrefixArgs(args ...interface{}) []interface{} {
-	if len(args) == 0 {
-		return args
-	}
-	firstArgStr, ok := args[0].(string)
-	if ok {
-		args[0] = stripGrpcPrefix(firstArgStr)
-	}
-	return args
-}
-
-func (l grpcLogger) Fatal(args ...interface{}) {
-	l.Critical(stripGrpcPrefixArgs(args)...)
-	os.Exit(1)
-}
-
-func (l grpcLogger) Fatalf(format string, args ...interface{}) {
-	l.Criticalf(stripGrpcPrefix(format), args...)
-	os.Exit(1)
-}
-
-func (l grpcLogger) Fatalln(args ...interface{}) {
-	l.Critical(stripGrpcPrefixArgs(args)...)
-	os.Exit(1)
-}
-
-func (l grpcLogger) Print(args ...interface{}) {
-	l.Info(stripGrpcPrefixArgs(args)...)
-}
-
-func (l grpcLogger) Printf(format string, args ...interface{}) {
-	l.Infof(stripGrpcPrefix(format), args...)
-}
-
-func (l grpcLogger) Println(args ...interface{}) {
-	l.Info(stripGrpcPrefixArgs(args)...)
-}
 
 // Loggers per subsytem.  Note that backendLog is a seelog logger that all of
 // the subsystem loggers route their messages to.  When adding new subsystems,
@@ -148,7 +93,7 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		btcrpcclient.UseLogger(logger)
 	case "GRPC":
 		grpcLog = logger
-		grpclog.SetLogger(grpcLogger{logger})
+		rpcserver.UseLogger(logger)
 	case "LRPC":
 		legacyRPCLog = logger
 		legacyrpc.UseLogger(logger)

@@ -34,12 +34,10 @@ It has these top-level messages:
 	GetTransactionsResponse
 	ChangePassphraseRequest
 	ChangePassphraseResponse
-	SelectUnspentOutputsRequest
-	SelectUnspentOutputsResponse
+	FundTransactionRequest
+	FundTransactionResponse
 	SignTransactionRequest
 	SignTransactionResponse
-	CreateSignedTransactionRequest
-	CreateSignedTransactionResponse
 	PublishTransactionRequest
 	PublishTransactionResponse
 	TransactionNotificationsRequest
@@ -133,9 +131,7 @@ func (m *TransactionDetails_Input) String() string { return proto.CompactTextStr
 func (*TransactionDetails_Input) ProtoMessage()    {}
 
 type TransactionDetails_Output struct {
-	Index  uint32 `protobuf:"varint,1,opt,name=index" json:"index,omitempty"`
-	Amount int64  `protobuf:"varint,2,opt,name=amount" json:"amount,omitempty"`
-	Mine   bool   `protobuf:"varint,3,opt,name=mine" json:"mine,omitempty"`
+	Mine bool `protobuf:"varint,3,opt,name=mine" json:"mine,omitempty"`
 	// These fields only relevant if mine==true.
 	Account  uint32 `protobuf:"varint,4,opt,name=account" json:"account,omitempty"`
 	Internal bool   `protobuf:"varint,5,opt,name=internal" json:"internal,omitempty"`
@@ -360,6 +356,8 @@ type GetTransactionsRequest struct {
 	EndingBlockHeight int32  `protobuf:"varint,4,opt,name=ending_block_height" json:"ending_block_height,omitempty"`
 	// Include at least this many of the newest transactions if they exist.
 	// Cannot be used when the ending block hash is specified.
+	//
+	// TODO: remove until spec adds it back in some way.
 	MinimumRecentTransactions int32 `protobuf:"varint,5,opt,name=minimum_recent_transactions" json:"minimum_recent_transactions,omitempty"`
 }
 
@@ -407,34 +405,36 @@ func (m *ChangePassphraseResponse) Reset()         { *m = ChangePassphraseRespon
 func (m *ChangePassphraseResponse) String() string { return proto.CompactTextString(m) }
 func (*ChangePassphraseResponse) ProtoMessage()    {}
 
-type SelectUnspentOutputsRequest struct {
+type FundTransactionRequest struct {
 	Account                  uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
 	TargetAmount             int64  `protobuf:"varint,2,opt,name=target_amount" json:"target_amount,omitempty"`
 	RequiredConfirmations    int32  `protobuf:"varint,3,opt,name=required_confirmations" json:"required_confirmations,omitempty"`
 	IncludeImmatureCoinbases bool   `protobuf:"varint,4,opt,name=include_immature_coinbases" json:"include_immature_coinbases,omitempty"`
+	IncludeChangeScript      bool   `protobuf:"varint,5,opt,name=include_change_script" json:"include_change_script,omitempty"`
 }
 
-func (m *SelectUnspentOutputsRequest) Reset()         { *m = SelectUnspentOutputsRequest{} }
-func (m *SelectUnspentOutputsRequest) String() string { return proto.CompactTextString(m) }
-func (*SelectUnspentOutputsRequest) ProtoMessage()    {}
+func (m *FundTransactionRequest) Reset()         { *m = FundTransactionRequest{} }
+func (m *FundTransactionRequest) String() string { return proto.CompactTextString(m) }
+func (*FundTransactionRequest) ProtoMessage()    {}
 
-type SelectUnspentOutputsResponse struct {
-	Outputs     []*SelectUnspentOutputsResponse_Output `protobuf:"bytes,1,rep,name=outputs" json:"outputs,omitempty"`
-	TotalAmount int64                                  `protobuf:"varint,2,opt,name=total_amount" json:"total_amount,omitempty"`
+type FundTransactionResponse struct {
+	SelectedOutputs []*FundTransactionResponse_PreviousOutput `protobuf:"bytes,1,rep,name=selected_outputs" json:"selected_outputs,omitempty"`
+	TotalAmount     int64                                     `protobuf:"varint,2,opt,name=total_amount" json:"total_amount,omitempty"`
+	ChangePkScript  []byte                                    `protobuf:"bytes,3,opt,name=change_pk_script,proto3" json:"change_pk_script,omitempty"`
 }
 
-func (m *SelectUnspentOutputsResponse) Reset()         { *m = SelectUnspentOutputsResponse{} }
-func (m *SelectUnspentOutputsResponse) String() string { return proto.CompactTextString(m) }
-func (*SelectUnspentOutputsResponse) ProtoMessage()    {}
+func (m *FundTransactionResponse) Reset()         { *m = FundTransactionResponse{} }
+func (m *FundTransactionResponse) String() string { return proto.CompactTextString(m) }
+func (*FundTransactionResponse) ProtoMessage()    {}
 
-func (m *SelectUnspentOutputsResponse) GetOutputs() []*SelectUnspentOutputsResponse_Output {
+func (m *FundTransactionResponse) GetSelectedOutputs() []*FundTransactionResponse_PreviousOutput {
 	if m != nil {
-		return m.Outputs
+		return m.SelectedOutputs
 	}
 	return nil
 }
 
-type SelectUnspentOutputsResponse_Output struct {
+type FundTransactionResponse_PreviousOutput struct {
 	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
 	OutputIndex     uint32 `protobuf:"varint,2,opt,name=output_index" json:"output_index,omitempty"`
 	Amount          int64  `protobuf:"varint,3,opt,name=amount" json:"amount,omitempty"`
@@ -443,13 +443,15 @@ type SelectUnspentOutputsResponse_Output struct {
 	FromCoinbase    bool   `protobuf:"varint,6,opt,name=from_coinbase" json:"from_coinbase,omitempty"`
 }
 
-func (m *SelectUnspentOutputsResponse_Output) Reset()         { *m = SelectUnspentOutputsResponse_Output{} }
-func (m *SelectUnspentOutputsResponse_Output) String() string { return proto.CompactTextString(m) }
-func (*SelectUnspentOutputsResponse_Output) ProtoMessage()    {}
+func (m *FundTransactionResponse_PreviousOutput) Reset() {
+	*m = FundTransactionResponse_PreviousOutput{}
+}
+func (m *FundTransactionResponse_PreviousOutput) String() string { return proto.CompactTextString(m) }
+func (*FundTransactionResponse_PreviousOutput) ProtoMessage()    {}
 
 type SignTransactionRequest struct {
-	Passphrase  []byte `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
-	Transaction []byte `protobuf:"bytes,2,opt,name=transaction,proto3" json:"transaction,omitempty"`
+	Passphrase            []byte `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
+	SerializedTransaction []byte `protobuf:"bytes,2,opt,name=serialized_transaction,proto3" json:"serialized_transaction,omitempty"`
 	// If no indexes are specified, signatures scripts will be added for
 	// every input. If any input indexes are specified, only those inputs
 	// will be signed.  Rather than returning an incompletely signed
@@ -463,49 +465,13 @@ func (m *SignTransactionRequest) String() string { return proto.CompactTextStrin
 func (*SignTransactionRequest) ProtoMessage()    {}
 
 type SignTransactionResponse struct {
-	Transaction []byte `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
+	Transaction          []byte   `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
+	UnsignedInputIndexes []uint32 `protobuf:"varint,2,rep,name=unsigned_input_indexes" json:"unsigned_input_indexes,omitempty"`
 }
 
 func (m *SignTransactionResponse) Reset()         { *m = SignTransactionResponse{} }
 func (m *SignTransactionResponse) String() string { return proto.CompactTextString(m) }
 func (*SignTransactionResponse) ProtoMessage()    {}
-
-type CreateSignedTransactionRequest struct {
-	Passphrase            []byte                                   `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
-	Account               uint32                                   `protobuf:"varint,2,opt,name=account" json:"account,omitempty"`
-	RequiredConfirmations int32                                    `protobuf:"varint,3,opt,name=required_confirmations" json:"required_confirmations,omitempty"`
-	Outputs               []*CreateSignedTransactionRequest_Output `protobuf:"bytes,4,rep,name=outputs" json:"outputs,omitempty"`
-	RandomizeOutputOrder  bool                                     `protobuf:"varint,5,opt,name=randomize_output_order" json:"randomize_output_order,omitempty"`
-}
-
-func (m *CreateSignedTransactionRequest) Reset()         { *m = CreateSignedTransactionRequest{} }
-func (m *CreateSignedTransactionRequest) String() string { return proto.CompactTextString(m) }
-func (*CreateSignedTransactionRequest) ProtoMessage()    {}
-
-func (m *CreateSignedTransactionRequest) GetOutputs() []*CreateSignedTransactionRequest_Output {
-	if m != nil {
-		return m.Outputs
-	}
-	return nil
-}
-
-type CreateSignedTransactionRequest_Output struct {
-	Amount   int64  `protobuf:"varint,1,opt,name=amount" json:"amount,omitempty"`
-	PkScript []byte `protobuf:"bytes,2,opt,name=pk_script,proto3" json:"pk_script,omitempty"`
-}
-
-func (m *CreateSignedTransactionRequest_Output) Reset()         { *m = CreateSignedTransactionRequest_Output{} }
-func (m *CreateSignedTransactionRequest_Output) String() string { return proto.CompactTextString(m) }
-func (*CreateSignedTransactionRequest_Output) ProtoMessage()    {}
-
-type CreateSignedTransactionResponse struct {
-	Transaction []byte `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
-	Fee         int64  `protobuf:"varint,2,opt,name=fee" json:"fee,omitempty"`
-}
-
-func (m *CreateSignedTransactionResponse) Reset()         { *m = CreateSignedTransactionResponse{} }
-func (m *CreateSignedTransactionResponse) String() string { return proto.CompactTextString(m) }
-func (*CreateSignedTransactionResponse) ProtoMessage()    {}
 
 type PublishTransactionRequest struct {
 	SignedTransaction []byte `protobuf:"bytes,1,opt,name=signed_transaction,proto3" json:"signed_transaction,omitempty"`
@@ -546,9 +512,6 @@ type TransactionNotificationsResponse struct {
 	// Instead of notifying all of the removed unmined transactions,
 	// just send all of the current hashes.
 	UnminedTransactionHashes [][]byte `protobuf:"bytes,4,rep,name=unmined_transaction_hashes,proto3" json:"unmined_transaction_hashes,omitempty"`
-	// Total balances for every affected account.  If an account is
-	// not included here, the previous balance did not change.
-	NewBalances []*AccountBalance `protobuf:"bytes,5,rep,name=new_balances" json:"new_balances,omitempty"`
 }
 
 func (m *TransactionNotificationsResponse) Reset()         { *m = TransactionNotificationsResponse{} }
@@ -569,13 +532,6 @@ func (m *TransactionNotificationsResponse) GetUnminedTransactions() []*Transacti
 	return nil
 }
 
-func (m *TransactionNotificationsResponse) GetNewBalances() []*AccountBalance {
-	if m != nil {
-		return m.NewBalances
-	}
-	return nil
-}
-
 type SpentnessNotificationsRequest struct {
 	Account         uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
 	NoNotifyUnspent bool   `protobuf:"varint,2,opt,name=no_notify_unspent" json:"no_notify_unspent,omitempty"`
@@ -587,9 +543,9 @@ func (m *SpentnessNotificationsRequest) String() string { return proto.CompactTe
 func (*SpentnessNotificationsRequest) ProtoMessage()    {}
 
 type SpentnessNotificationsResponse struct {
-	Hash    []byte                                  `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
-	Index   uint32                                  `protobuf:"varint,2,opt,name=index" json:"index,omitempty"`
-	Spender *SpentnessNotificationsResponse_Spender `protobuf:"bytes,3,opt,name=spender" json:"spender,omitempty"`
+	TransactionHash []byte                                  `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
+	OutputIndex     uint32                                  `protobuf:"varint,2,opt,name=output_index" json:"output_index,omitempty"`
+	Spender         *SpentnessNotificationsResponse_Spender `protobuf:"bytes,3,opt,name=spender" json:"spender,omitempty"`
 }
 
 func (m *SpentnessNotificationsResponse) Reset()         { *m = SpentnessNotificationsResponse{} }
@@ -604,8 +560,8 @@ func (m *SpentnessNotificationsResponse) GetSpender() *SpentnessNotificationsRes
 }
 
 type SpentnessNotificationsResponse_Spender struct {
-	Hash  []byte `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
-	Index uint32 `protobuf:"varint,2,opt,name=index" json:"index,omitempty"`
+	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
+	InputIndex      uint32 `protobuf:"varint,2,opt,name=input_index" json:"input_index,omitempty"`
 }
 
 func (m *SpentnessNotificationsResponse_Spender) Reset() {
@@ -729,20 +685,18 @@ type WalletServiceClient interface {
 	AccountNumber(ctx context.Context, in *AccountNumberRequest, opts ...grpc.CallOption) (*AccountNumberResponse, error)
 	Accounts(ctx context.Context, in *AccountsRequest, opts ...grpc.CallOption) (*AccountsResponse, error)
 	Balance(ctx context.Context, in *BalanceRequest, opts ...grpc.CallOption) (*BalanceResponse, error)
-	SelectUnspentOutputs(ctx context.Context, in *SelectUnspentOutputsRequest, opts ...grpc.CallOption) (*SelectUnspentOutputsResponse, error)
 	GetTransactions(ctx context.Context, in *GetTransactionsRequest, opts ...grpc.CallOption) (*GetTransactionsResponse, error)
 	// Notifications
 	TransactionNotifications(ctx context.Context, in *TransactionNotificationsRequest, opts ...grpc.CallOption) (WalletService_TransactionNotificationsClient, error)
 	SpentnessNotifications(ctx context.Context, in *SpentnessNotificationsRequest, opts ...grpc.CallOption) (WalletService_SpentnessNotificationsClient, error)
 	AccountNotifications(ctx context.Context, in *AccountNotificationsRequest, opts ...grpc.CallOption) (WalletService_AccountNotificationsClient, error)
 	// Control
-	// TODO: unlock public encryption (needs a wallet refactor, currently prompts from stdin at startup)
 	ChangePassphrase(ctx context.Context, in *ChangePassphraseRequest, opts ...grpc.CallOption) (*ChangePassphraseResponse, error)
 	RenameAccount(ctx context.Context, in *RenameAccountRequest, opts ...grpc.CallOption) (*RenameAccountResponse, error)
 	NextAccount(ctx context.Context, in *NextAccountRequest, opts ...grpc.CallOption) (*NextAccountResponse, error)
 	NextAddress(ctx context.Context, in *NextAddressRequest, opts ...grpc.CallOption) (*NextAddressResponse, error)
 	ImportPrivateKey(ctx context.Context, in *ImportPrivateKeyRequest, opts ...grpc.CallOption) (*ImportPrivateKeyResponse, error)
-	CreateSignedTransaction(ctx context.Context, in *CreateSignedTransactionRequest, opts ...grpc.CallOption) (*CreateSignedTransactionResponse, error)
+	FundTransaction(ctx context.Context, in *FundTransactionRequest, opts ...grpc.CallOption) (*FundTransactionResponse, error)
 	SignTransaction(ctx context.Context, in *SignTransactionRequest, opts ...grpc.CallOption) (*SignTransactionResponse, error)
 	PublishTransaction(ctx context.Context, in *PublishTransactionRequest, opts ...grpc.CallOption) (*PublishTransactionResponse, error)
 }
@@ -794,15 +748,6 @@ func (c *walletServiceClient) Accounts(ctx context.Context, in *AccountsRequest,
 func (c *walletServiceClient) Balance(ctx context.Context, in *BalanceRequest, opts ...grpc.CallOption) (*BalanceResponse, error) {
 	out := new(BalanceResponse)
 	err := grpc.Invoke(ctx, "/walletrpc.WalletService/Balance", in, out, c.cc, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *walletServiceClient) SelectUnspentOutputs(ctx context.Context, in *SelectUnspentOutputsRequest, opts ...grpc.CallOption) (*SelectUnspentOutputsResponse, error) {
-	out := new(SelectUnspentOutputsResponse)
-	err := grpc.Invoke(ctx, "/walletrpc.WalletService/SelectUnspentOutputs", in, out, c.cc, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -959,9 +904,9 @@ func (c *walletServiceClient) ImportPrivateKey(ctx context.Context, in *ImportPr
 	return out, nil
 }
 
-func (c *walletServiceClient) CreateSignedTransaction(ctx context.Context, in *CreateSignedTransactionRequest, opts ...grpc.CallOption) (*CreateSignedTransactionResponse, error) {
-	out := new(CreateSignedTransactionResponse)
-	err := grpc.Invoke(ctx, "/walletrpc.WalletService/CreateSignedTransaction", in, out, c.cc, opts...)
+func (c *walletServiceClient) FundTransaction(ctx context.Context, in *FundTransactionRequest, opts ...grpc.CallOption) (*FundTransactionResponse, error) {
+	out := new(FundTransactionResponse)
+	err := grpc.Invoke(ctx, "/walletrpc.WalletService/FundTransaction", in, out, c.cc, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -995,20 +940,18 @@ type WalletServiceServer interface {
 	AccountNumber(context.Context, *AccountNumberRequest) (*AccountNumberResponse, error)
 	Accounts(context.Context, *AccountsRequest) (*AccountsResponse, error)
 	Balance(context.Context, *BalanceRequest) (*BalanceResponse, error)
-	SelectUnspentOutputs(context.Context, *SelectUnspentOutputsRequest) (*SelectUnspentOutputsResponse, error)
 	GetTransactions(context.Context, *GetTransactionsRequest) (*GetTransactionsResponse, error)
 	// Notifications
 	TransactionNotifications(*TransactionNotificationsRequest, WalletService_TransactionNotificationsServer) error
 	SpentnessNotifications(*SpentnessNotificationsRequest, WalletService_SpentnessNotificationsServer) error
 	AccountNotifications(*AccountNotificationsRequest, WalletService_AccountNotificationsServer) error
 	// Control
-	// TODO: unlock public encryption (needs a wallet refactor, currently prompts from stdin at startup)
 	ChangePassphrase(context.Context, *ChangePassphraseRequest) (*ChangePassphraseResponse, error)
 	RenameAccount(context.Context, *RenameAccountRequest) (*RenameAccountResponse, error)
 	NextAccount(context.Context, *NextAccountRequest) (*NextAccountResponse, error)
 	NextAddress(context.Context, *NextAddressRequest) (*NextAddressResponse, error)
 	ImportPrivateKey(context.Context, *ImportPrivateKeyRequest) (*ImportPrivateKeyResponse, error)
-	CreateSignedTransaction(context.Context, *CreateSignedTransactionRequest) (*CreateSignedTransactionResponse, error)
+	FundTransaction(context.Context, *FundTransactionRequest) (*FundTransactionResponse, error)
 	SignTransaction(context.Context, *SignTransactionRequest) (*SignTransactionResponse, error)
 	PublishTransaction(context.Context, *PublishTransactionRequest) (*PublishTransactionResponse, error)
 }
@@ -1071,18 +1014,6 @@ func _WalletService_Balance_Handler(srv interface{}, ctx context.Context, dec fu
 		return nil, err
 	}
 	out, err := srv.(WalletServiceServer).Balance(ctx, in)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func _WalletService_SelectUnspentOutputs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
-	in := new(SelectUnspentOutputsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	out, err := srv.(WalletServiceServer).SelectUnspentOutputs(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -1224,12 +1155,12 @@ func _WalletService_ImportPrivateKey_Handler(srv interface{}, ctx context.Contex
 	return out, nil
 }
 
-func _WalletService_CreateSignedTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
-	in := new(CreateSignedTransactionRequest)
+func _WalletService_FundTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+	in := new(FundTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).CreateSignedTransaction(ctx, in)
+	out, err := srv.(WalletServiceServer).FundTransaction(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -1285,10 +1216,6 @@ var _WalletService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _WalletService_Balance_Handler,
 		},
 		{
-			MethodName: "SelectUnspentOutputs",
-			Handler:    _WalletService_SelectUnspentOutputs_Handler,
-		},
-		{
 			MethodName: "GetTransactions",
 			Handler:    _WalletService_GetTransactions_Handler,
 		},
@@ -1313,8 +1240,8 @@ var _WalletService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _WalletService_ImportPrivateKey_Handler,
 		},
 		{
-			MethodName: "CreateSignedTransaction",
-			Handler:    _WalletService_CreateSignedTransaction_Handler,
+			MethodName: "FundTransaction",
+			Handler:    _WalletService_FundTransaction_Handler,
 		},
 		{
 			MethodName: "SignTransaction",
@@ -1347,10 +1274,10 @@ var _WalletService_serviceDesc = grpc.ServiceDesc{
 // Client API for WalletLoaderService service
 
 type WalletLoaderServiceClient interface {
+	WalletExists(ctx context.Context, in *WalletExistsRequest, opts ...grpc.CallOption) (*WalletExistsResponse, error)
 	CreateWallet(ctx context.Context, in *CreateWalletRequest, opts ...grpc.CallOption) (*CreateWalletResponse, error)
 	OpenWallet(ctx context.Context, in *OpenWalletRequest, opts ...grpc.CallOption) (*OpenWalletResponse, error)
 	CloseWallet(ctx context.Context, in *CloseWalletRequest, opts ...grpc.CallOption) (*CloseWalletResponse, error)
-	WalletExists(ctx context.Context, in *WalletExistsRequest, opts ...grpc.CallOption) (*WalletExistsResponse, error)
 	StartBtcdRpc(ctx context.Context, in *StartBtcdRpcRequest, opts ...grpc.CallOption) (*StartBtcdRpcResponse, error)
 }
 
@@ -1360,6 +1287,15 @@ type walletLoaderServiceClient struct {
 
 func NewWalletLoaderServiceClient(cc *grpc.ClientConn) WalletLoaderServiceClient {
 	return &walletLoaderServiceClient{cc}
+}
+
+func (c *walletLoaderServiceClient) WalletExists(ctx context.Context, in *WalletExistsRequest, opts ...grpc.CallOption) (*WalletExistsResponse, error) {
+	out := new(WalletExistsResponse)
+	err := grpc.Invoke(ctx, "/walletrpc.WalletLoaderService/WalletExists", in, out, c.cc, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *walletLoaderServiceClient) CreateWallet(ctx context.Context, in *CreateWalletRequest, opts ...grpc.CallOption) (*CreateWalletResponse, error) {
@@ -1389,15 +1325,6 @@ func (c *walletLoaderServiceClient) CloseWallet(ctx context.Context, in *CloseWa
 	return out, nil
 }
 
-func (c *walletLoaderServiceClient) WalletExists(ctx context.Context, in *WalletExistsRequest, opts ...grpc.CallOption) (*WalletExistsResponse, error) {
-	out := new(WalletExistsResponse)
-	err := grpc.Invoke(ctx, "/walletrpc.WalletLoaderService/WalletExists", in, out, c.cc, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *walletLoaderServiceClient) StartBtcdRpc(ctx context.Context, in *StartBtcdRpcRequest, opts ...grpc.CallOption) (*StartBtcdRpcResponse, error) {
 	out := new(StartBtcdRpcResponse)
 	err := grpc.Invoke(ctx, "/walletrpc.WalletLoaderService/StartBtcdRpc", in, out, c.cc, opts...)
@@ -1410,15 +1337,27 @@ func (c *walletLoaderServiceClient) StartBtcdRpc(ctx context.Context, in *StartB
 // Server API for WalletLoaderService service
 
 type WalletLoaderServiceServer interface {
+	WalletExists(context.Context, *WalletExistsRequest) (*WalletExistsResponse, error)
 	CreateWallet(context.Context, *CreateWalletRequest) (*CreateWalletResponse, error)
 	OpenWallet(context.Context, *OpenWalletRequest) (*OpenWalletResponse, error)
 	CloseWallet(context.Context, *CloseWalletRequest) (*CloseWalletResponse, error)
-	WalletExists(context.Context, *WalletExistsRequest) (*WalletExistsResponse, error)
 	StartBtcdRpc(context.Context, *StartBtcdRpcRequest) (*StartBtcdRpcResponse, error)
 }
 
 func RegisterWalletLoaderServiceServer(s *grpc.Server, srv WalletLoaderServiceServer) {
 	s.RegisterService(&_WalletLoaderService_serviceDesc, srv)
+}
+
+func _WalletLoaderService_WalletExists_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+	in := new(WalletExistsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	out, err := srv.(WalletLoaderServiceServer).WalletExists(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func _WalletLoaderService_CreateWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
@@ -1457,18 +1396,6 @@ func _WalletLoaderService_CloseWallet_Handler(srv interface{}, ctx context.Conte
 	return out, nil
 }
 
-func _WalletLoaderService_WalletExists_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
-	in := new(WalletExistsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	out, err := srv.(WalletLoaderServiceServer).WalletExists(ctx, in)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func _WalletLoaderService_StartBtcdRpc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
 	in := new(StartBtcdRpcRequest)
 	if err := dec(in); err != nil {
@@ -1486,6 +1413,10 @@ var _WalletLoaderService_serviceDesc = grpc.ServiceDesc{
 	HandlerType: (*WalletLoaderServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "WalletExists",
+			Handler:    _WalletLoaderService_WalletExists_Handler,
+		},
+		{
 			MethodName: "CreateWallet",
 			Handler:    _WalletLoaderService_CreateWallet_Handler,
 		},
@@ -1496,10 +1427,6 @@ var _WalletLoaderService_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CloseWallet",
 			Handler:    _WalletLoaderService_CloseWallet_Handler,
-		},
-		{
-			MethodName: "WalletExists",
-			Handler:    _WalletLoaderService_WalletExists_Handler,
 		},
 		{
 			MethodName: "StartBtcdRpc",

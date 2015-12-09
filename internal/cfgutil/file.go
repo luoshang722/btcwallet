@@ -18,7 +18,7 @@ package cfgutil
 
 import "os"
 
-// FilesExists reports whether the named file or directory exists.
+// FileExists reports whether the named file or directory exists.
 func FileExists(filePath string) (bool, error) {
 	_, err := os.Stat(filePath)
 	if err != nil {

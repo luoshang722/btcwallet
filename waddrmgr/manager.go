@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2014-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -167,6 +167,8 @@ type accountInfo struct {
 	lastInternalAddr  ManagedAddress
 }
 
+// AccountProperties contains properties associated with each account, such as
+// the account name, number, and the nubmer of derived and imported keys.
 type AccountProperties struct {
 	AccountNumber    uint32
 	AccountName      string
@@ -558,30 +560,55 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	return acctInfo, nil
 }
 
-// AccountProperties returns the current name,
-// TODO: Return the new account properties each time an account change occurs
-// to avoid opening a second read transaction after the write.
+// AccountProperties returns properties associated with the account, such as the
+// account number, name, and the number of derived and imported keys.
+//
+// TODO: Instead of opening a second read transaction after making a change, and
+// then fetching the account properties with a new read tx, this can be made
+// more performant by simply returning the new account properties during the
+// change.
 func (m *Manager) AccountProperties(account uint32) (*AccountProperties, error) {
 	defer m.mtx.RUnlock()
 	m.mtx.RLock()
 
-	acctInfo, err := m.loadAccountInfo(account)
-	if err != nil {
-		return nil, err
-	}
-
-	props := &AccountProperties{
-		AccountNumber: account,
-		AccountName:   acctInfo.acctName,
-	}
+	props := &AccountProperties{AccountNumber: account}
 
 	// Until keys can be imported into any account, special handling is
 	// required for the imported account.
+	//
+	// loadAccountInfo errors when using it on the imported account since
+	// the accountInfo struct is filled with a BIP0044 account's extended
+	// keys, and the imported accounts has none.
+	//
+	// Since only the imported account allows imports currently, the number
+	// of imported keys for any other account is zero, and since the
+	// imported account cannot contain non-imported keys, the external and
+	// internal key counts for it are zero.
 	if account != ImportedAddrAccount {
+		acctInfo, err := m.loadAccountInfo(account)
+		if err != nil {
+			return nil, err
+		}
+		props.AccountName = acctInfo.acctName
 		props.ExternalKeyCount = acctInfo.nextExternalIndex
 		props.InternalKeyCount = acctInfo.nextInternalIndex
 	} else {
-		props.ImportedKeyCount = 0
+		props.AccountName = ImportedAddrAccountName // reserved, nonchangable
+
+		// Could be more efficient if this was tracked by the db.
+		var importedKeyCount uint32
+		err := m.namespace.View(func(tx walletdb.Tx) error {
+			count := func(interface{}) error {
+				importedKeyCount++
+				return nil
+			}
+			return forEachAccountAddress(tx, ImportedAddrAccount,
+				count)
+		})
+		if err != nil {
+			return nil, err
+		}
+		props.ImportedKeyCount = importedKeyCount
 	}
 
 	return props, nil

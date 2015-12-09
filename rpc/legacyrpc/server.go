@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2013-2015 The btcsuite developers
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 package legacyrpc
 
 import (
@@ -178,7 +194,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 				return
 			}
 			wsc := newWebsocketClient(conn, authenticated, r.RemoteAddr)
-			server.WebsocketClientRPC(wsc)
+			server.websocketClientRPC(wsc)
 		}))
 
 	server.wg.Add(3)
@@ -225,6 +241,8 @@ func (s *Server) serve(lis net.Listener) {
 	}()
 }
 
+// RegisterWallet associates the legacy RPC server with the wallet.  This
+// function must be called before any wallet RPCs can be called by clients.
 func (s *Server) RegisterWallet(w *wallet.Wallet) {
 	s.handlerMu.Lock()
 	s.wallet = w
@@ -292,14 +310,14 @@ func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
 	s.handlerMu.Unlock()
 }
 
-// HandlerClosure creates a closure function for handling requests of the given
+// handlerClosure creates a closure function for handling requests of the given
 // method.  This may be a request that is handled directly by btcwallet, or
 // a chain server request that is handled by passing the request down to btcd.
 //
 // NOTE: These handlers do not handle special cases, such as the authenticate
 // method.  Each of these must be checked beforehand (the method is already
 // known) and handled accordingly.
-func (s *Server) HandlerClosure(request *btcjson.Request) lazyHandler {
+func (s *Server) handlerClosure(request *btcjson.Request) lazyHandler {
 	s.handlerMu.Lock()
 	// With the lock held, make copies of these pointers for the closure.
 	wallet := s.wallet
@@ -410,7 +428,7 @@ func (s *Server) invalidAuth(req *btcjson.Request) bool {
 	return subtle.ConstantTimeCompare(authSha[:], s.authsha[:]) != 1
 }
 
-func (s *Server) WebsocketClientRead(wsc *websocketClient) {
+func (s *Server) websocketClientRead(wsc *websocketClient) {
 	for {
 		_, request, err := wsc.conn.ReadMessage()
 		if err != nil {
@@ -425,7 +443,7 @@ func (s *Server) WebsocketClientRead(wsc *websocketClient) {
 	}
 }
 
-func (s *Server) WebsocketClientRespond(wsc *websocketClient) {
+func (s *Server) websocketClientRespond(wsc *websocketClient) {
 	// A for-select with a read of the quit channel is used instead of a
 	// for-range to provide clean shutdown.  This is necessary due to
 	// WebsocketClientRead (which sends to the allRequests chan) not closing
@@ -505,7 +523,7 @@ out:
 
 			default:
 				req := req // Copy for the closure
-				f := s.HandlerClosure(&req)
+				f := s.handlerClosure(&req)
 				wsc.wg.Add(1)
 				go func() {
 					resp, jsonErr := f()
@@ -540,7 +558,7 @@ out:
 	s.wg.Done()
 }
 
-func (s *Server) WebsocketClientSend(wsc *websocketClient) {
+func (s *Server) websocketClientSend(wsc *websocketClient) {
 	const deadline time.Duration = 2 * time.Second
 out:
 	for {
@@ -572,9 +590,9 @@ out:
 	s.wg.Done()
 }
 
-// WebsocketClientRPC starts the goroutines to serve JSON-RPC requests and
+// websocketClientRPC starts the goroutines to serve JSON-RPC requests and
 // notifications over a websocket connection for a single client.
-func (s *Server) WebsocketClientRPC(wsc *websocketClient) {
+func (s *Server) websocketClientRPC(wsc *websocketClient) {
 	log.Infof("New websocket client %s", wsc.remoteAddr)
 
 	// Clear the read deadline set before the websocket hijacked
@@ -595,11 +613,11 @@ func (s *Server) WebsocketClientRPC(wsc *websocketClient) {
 	// so it is ignored during shutdown.  This is to prevent a hang during
 	// shutdown where the goroutine is blocked on a read of the
 	// websocket connection if the client is still connected.
-	go s.WebsocketClientRead(wsc)
+	go s.websocketClientRead(wsc)
 
 	s.wg.Add(2)
-	go s.WebsocketClientRespond(wsc)
-	go s.WebsocketClientSend(wsc)
+	go s.websocketClientRespond(wsc)
+	go s.websocketClientSend(wsc)
 
 	<-wsc.quit
 }
@@ -654,7 +672,7 @@ func (s *Server) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 		stop = true
 		res = "btcwallet stopping"
 	default:
-		res, jsonErr = s.HandlerClosure(&req)()
+		res, jsonErr = s.handlerClosure(&req)()
 	}
 
 	// Marshal and send.

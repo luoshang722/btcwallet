@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -18,7 +19,12 @@ const (
 )
 
 var (
+	// ErrLoaded describes the error condition of attempting to load or
+	// create a wallet when the loader has already done so.
 	ErrLoaded = errors.New("wallet already loaded")
+
+	// ErrExists describes the error condition of attempting to create a new
+	// wallet when one exists already.
 	ErrExists = errors.New("wallet already exists")
 )
 
@@ -38,6 +44,7 @@ type Loader struct {
 	mu          sync.Mutex
 }
 
+// NewLoader constructs a Loader.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string) *Loader {
 	return &Loader{
 		chainParams: chainParams,
@@ -45,24 +52,8 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string) *Loader {
 	}
 }
 
-func (l *Loader) GetOrAddCallback(fn func(*Wallet, walletdb.DB)) (w *Wallet, db walletdb.DB, ok bool) {
-	l.mu.Lock()
-
-	w = l.wallet
-	db = l.db
-	ok = l.wallet != nil
-
-	if !ok {
-		l.callbacks = append(l.callbacks, fn)
-	}
-
-	l.mu.Unlock()
-
-	return
-}
-
-// Executes each added callback and prevents loader from loading any additional
-// wallets.  Requires mutex to be locked.
+// onLoaded executes each added callback and prevents loader from loading any
+// additional wallets.  Requires mutex to be locked.
 func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
 	for _, fn := range l.callbacks {
 		fn(w, db)
@@ -120,6 +111,13 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	}
 
 	// Create the address manager.
+	if seed != nil {
+		if len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+
+			return nil, hdkeychain.ErrInvalidSeedLen
+		}
+	}
 	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -150,12 +148,16 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	return w, nil
 }
 
-var noConsoleErr = errors.New("db upgrade requires console access for additional input")
+var errNoConsole = errors.New("db upgrade requires console access for additional input")
 
 func noConsole() ([]byte, error) {
-	return nil, noConsoleErr
+	return nil, errNoConsole
 }
 
+// OpenExistingWallet opens the wallet from the loader's wallet database path
+// and the public passphrase.  If the loader is being called by a context where
+// standard input prompts may be used during wallet upgrades, setting
+// canConsolePrompt will enables these prompts.
 func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (*Wallet, error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
@@ -207,11 +209,16 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	return w, nil
 }
 
+// WalletExists returns whether a file exists at the loader's database path.
+// This may return an error for unexpected I/O failures.
 func (l *Loader) WalletExists() (bool, error) {
 	dbPath := filepath.Join(l.dbDirPath, walletDbName)
 	return fileExists(dbPath)
 }
 
+// LoadedWallet returns the loaded wallet, if any, and a bool for whether the
+// wallet has been loaded or not.  If true, the wallet pointer should be safe to
+// dereference.
 func (l *Loader) LoadedWallet() (*Wallet, bool) {
 	l.mu.Lock()
 	w := l.wallet

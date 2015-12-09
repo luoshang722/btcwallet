@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
@@ -43,7 +44,7 @@ import (
 )
 
 const (
-	// DefaultPubPassphrase is the default outer encryption passphrase used
+	// InsecurePubPassphrase is the default outer encryption passphrase used
 	// for public data (everything but private keys).  Using a non-default
 	// public passphrase can prevent an attacker without the public
 	// passphrase from discovering all past and future wallet addresses if
@@ -51,7 +52,7 @@ const (
 	//
 	// NOTE: at time of writing, public encryption only applies to public
 	// data in the waddrmgr namespace.  Transactions are not yet encrypted.
-	DefaultPubPassphrase = "public"
+	InsecurePubPassphrase = "public"
 
 	walletDbWatchingOnlyName = "wowallet.db"
 )
@@ -303,6 +304,12 @@ func (w *Wallet) Start() {
 	go w.walletLocker()
 }
 
+// SynchronizeRPC associates the wallet with the consensus RPC client,
+// synchronizes the wallet with the latest changes to the blockchain, and
+// continuously updates the wallet through RPC notifications.
+//
+// This method is unstable and will be removed when all syncing logic is moved
+// outside of the wallet package.
 func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 	w.quitMu.Lock()
 	select {
@@ -313,6 +320,8 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 	}
 	w.quitMu.Unlock()
 
+	// TODO: Ignoring the new client when one is already set breaks callers
+	// who are replacing the client, perhaps after a disconnect.
 	w.chainClientLock.Lock()
 	if w.chainClient != nil {
 		w.chainClientLock.Unlock()
@@ -332,6 +341,10 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 	go w.rescanRPCHandler()
 }
 
+// requireChainClient marks that a wallet method can only be completed when the
+// consensus RPC server is set.  This function and all functions that call it
+// are unstable and will need to be moved when the syncing code is moved out of
+// the wallet.
 func (w *Wallet) requireChainClient() (*chain.RPCClient, error) {
 	w.chainClientLock.Lock()
 	chainClient := w.chainClient
@@ -342,6 +355,11 @@ func (w *Wallet) requireChainClient() (*chain.RPCClient, error) {
 	return chainClient, nil
 }
 
+// ChainClient returns the optional consensus RPC client associated with the
+// wallet.
+//
+// This function is unstable and will be removed once sync logic is moved out of
+// the wallet.
 func (w *Wallet) ChainClient() *chain.RPCClient {
 	w.chainClientLock.Lock()
 	chainClient := w.chainClient
@@ -797,10 +815,22 @@ func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 	return w.TxStore.Balance(confirms, blk.Height)
 }
 
-// CalculateAccountBalance sums the amounts of all unspent transaction
+// Balances records total, spendable (by policy), and immature coinbase
+// reward balance amounts.
+type Balances struct {
+	Total          btcutil.Amount
+	Spendable      btcutil.Amount
+	ImmatureReward btcutil.Amount
+}
+
+// CalculateAccountBalances sums the amounts of all unspent transaction
 // outputs to the given account of a wallet and returns the balance.
-func (w *Wallet) CalculateAccountBalance(account uint32, confirms int32) (btcutil.Amount, error) {
-	var bal btcutil.Amount
+//
+// This function is much slower than it needs to be since transactions outputs
+// are not indexed by the accounts they credit to, and all unspent transaction
+// outputs must be iterated.
+func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balances, error) {
+	var bals Balances
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
@@ -808,20 +838,10 @@ func (w *Wallet) CalculateAccountBalance(account uint32, confirms int32) (btcuti
 
 	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
-		return 0, err
+		return bals, err
 	}
 	for i := range unspent {
 		output := &unspent[i]
-
-		if !confirmed(confirms, output.Height, syncBlock.Height) {
-			continue
-		}
-		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
-			if !confirmed(target, output.Height, syncBlock.Height) {
-				continue
-			}
-		}
 
 		var outputAcct uint32
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
@@ -829,11 +849,21 @@ func (w *Wallet) CalculateAccountBalance(account uint32, confirms int32) (btcuti
 		if err == nil && len(addrs) > 0 {
 			outputAcct, err = w.Manager.AddrAccount(addrs[0])
 		}
-		if err == nil && outputAcct == account {
-			bal += output.Amount
+		if err != nil || outputAcct != account {
+			continue
+		}
+
+		bals.Total += output.Amount
+		if output.FromCoinBase {
+			const target = blockchain.CoinbaseMaturity
+			if !confirmed(target, output.Height, syncBlock.Height) {
+				bals.ImmatureReward += output.Amount
+			}
+		} else if confirmed(confirms, output.Height, syncBlock.Height) {
+			bals.Spendable += output.Amount
 		}
 	}
-	return bal, nil
+	return bals, nil
 }
 
 // CurrentAddress gets the most recently requested Bitcoin payment address
@@ -862,6 +892,7 @@ func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 	return addr.Address(), nil
 }
 
+// RenameAccount sets the name for an account number to newName.
 func (w *Wallet) RenameAccount(account uint32, newName string) error {
 	err := w.Manager.RenameAccount(account, newName)
 	if err != nil {
@@ -879,6 +910,8 @@ func (w *Wallet) RenameAccount(account uint32, newName string) error {
 	return nil
 }
 
+// NextAccount creates the next account and returns its account number.  The
+// name must be unique to the account.
 func (w *Wallet) NextAccount(name string) (uint32, error) {
 	account, err := w.Manager.NewAccount(name)
 	if err != nil {
@@ -1194,24 +1227,40 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 	return txList, err
 }
 
-type GetTransactionsResult struct {
-	MinedTransactions   []Block
-	UnminedTransactions []TransactionSummary
-}
-
+// BlockIdentifier identifies a block by either a height or a hash.
 type BlockIdentifier struct {
 	height int32
 	hash   *wire.ShaHash
 }
 
+// NewBlockIdentifierFromHeight constructs a BlockIdentifier for a block height.
 func NewBlockIdentifierFromHeight(height int32) *BlockIdentifier {
 	return &BlockIdentifier{height: height}
 }
 
+// NewBlockIdentifierFromHash constructs a BlockIdentifier for a block hash.
 func NewBlockIdentifierFromHash(hash *wire.ShaHash) *BlockIdentifier {
 	return &BlockIdentifier{hash: hash}
 }
 
+// GetTransactionsResult is the result of the wallet's GetTransactions method.
+// See GetTransactions for more details.
+type GetTransactionsResult struct {
+	MinedTransactions   []Block
+	UnminedTransactions []TransactionSummary
+}
+
+// GetTransactions returns transaction results between a starting and ending
+// block.  Blocks in the block range may be specified by either a height or a
+// hash.
+//
+// Because this is a possibly lenghtly operation, a cancel channel is provided
+// to cancel the task.  If this channel unblocks, the results created thus far
+// will be returned.
+//
+// Transaction results are organized by blocks in ascending order and unmined
+// transactions in an unspecified order.  Mined transactions are saved in a
+// Block structure which records properties about the block.
 func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <-chan struct{}) (*GetTransactionsResult, error) {
 	var start, end int32 = 0, -1
 
@@ -1293,18 +1342,26 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 	return &res, err
 }
 
+// AccountResult is a single account result for the AccountsResult type.
 type AccountResult struct {
-	AccountNumber uint32
-	AccountName   string
-	TotalBalance  btcutil.Amount
+	waddrmgr.AccountProperties
+	TotalBalance btcutil.Amount
 }
 
+// AccountsResult is the resutl of the wallet's Accounts method.  See that
+// method for more details.
 type AccountsResult struct {
 	Accounts           []AccountResult
 	CurrentBlockHash   *wire.ShaHash
 	CurrentBlockHeight int32
 }
 
+// Accounts returns the current names, numbers, and total balances of all
+// accounts in the wallet.  The current chain tip is included in the result for
+// atomicity reasons.
+//
+// TODO(jrick): Is the chain tip really needed, since only the total balances
+// are included?
 func (w *Wallet) Accounts() (*AccountsResult, error) {
 	var accounts []AccountResult
 	syncBlock := w.Manager.SyncedTo()
@@ -1313,13 +1370,13 @@ func (w *Wallet) Accounts() (*AccountsResult, error) {
 		return nil, err
 	}
 	err = w.Manager.ForEachAccount(func(acct uint32) error {
-		name, err := w.Manager.AccountName(acct)
+		props, err := w.Manager.AccountProperties(acct)
 		if err != nil {
 			return err
 		}
 		accounts = append(accounts, AccountResult{
-			AccountNumber: acct,
-			AccountName:   name,
+			AccountProperties: *props,
+			// TotalBalance set below
 		})
 		return nil
 	})
@@ -1986,6 +2043,143 @@ func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
 	return chainClient.SendRawTransaction(&rec.MsgTx, false)
 }
 
+// SignatureError records the underlying error when validating a transaction
+// input signature.
+type SignatureError struct {
+	InputIndex uint32
+	Error      error
+}
+
+// SignTransaction uses secrets of the wallet, as well as additional secrets
+// passed in by the caller, to create and add input signatures to a transaction.
+//
+// Transaction input script validation is used to confirm that all signatures
+// are valid.  For any invalid input, a SignatureError is added to the returns.
+// The final error return is reserved for unexpected or fatal errors, such as
+// being unable to determine a previous output script to redeem.
+//
+// The transaction pointed to by tx is modified by this function.
+func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
+	additionalPrevScripts map[wire.OutPoint][]byte,
+	additionalKeysByAddress map[string]*btcutil.WIF,
+	p2shRedeemScriptsByAddress map[string][]byte) ([]SignatureError, error) {
+
+	var signErrors []SignatureError
+	for i, txIn := range tx.TxIn {
+		prevOutScript, ok := additionalPrevScripts[txIn.PreviousOutPoint]
+		if !ok {
+			prevHash := &txIn.PreviousOutPoint.Hash
+			prevIndex := txIn.PreviousOutPoint.Index
+			txDetails, err := w.TxStore.TxDetails(prevHash)
+			if err != nil {
+				return nil, fmt.Errorf("%v not found",
+					txIn.PreviousOutPoint)
+			}
+			prevOutScript = txDetails.MsgTx.TxOut[prevIndex].PkScript
+		}
+
+		// Set up our callbacks that we pass to txscript so it can
+		// look up the appropriate keys and scripts by address.
+		getKey := txscript.KeyClosure(func(addr btcutil.Address) (
+			*btcec.PrivateKey, bool, error) {
+			if len(additionalKeysByAddress) != 0 {
+				addrStr := addr.EncodeAddress()
+				wif, ok := additionalKeysByAddress[addrStr]
+				if !ok {
+					return nil, false,
+						errors.New("no key for address")
+				}
+				return wif.PrivKey, wif.CompressPubKey, nil
+			}
+			address, err := w.Manager.Address(addr)
+			if err != nil {
+				return nil, false, err
+			}
+
+			pka, ok := address.(waddrmgr.ManagedPubKeyAddress)
+			if !ok {
+				return nil, false, errors.New("address is not " +
+					"a pubkey address")
+			}
+
+			key, err := pka.PrivKey()
+			if err != nil {
+				return nil, false, err
+			}
+
+			return key, pka.Compressed(), nil
+		})
+
+		getScript := txscript.ScriptClosure(func(
+			addr btcutil.Address) ([]byte, error) {
+			// If keys were provided then we can only use the
+			// redeem scripts provided with our inputs, too.
+			if len(additionalKeysByAddress) != 0 {
+				addrStr := addr.EncodeAddress()
+				script, ok := p2shRedeemScriptsByAddress[addrStr]
+				if !ok {
+					return nil, errors.New("no script for " +
+						"address")
+				}
+				return script, nil
+			}
+			address, err := w.Manager.Address(addr)
+			if err != nil {
+				return nil, err
+			}
+			sa, ok := address.(waddrmgr.ManagedScriptAddress)
+			if !ok {
+				return nil, errors.New("address is not a script" +
+					" address")
+			}
+
+			return sa.Script()
+		})
+
+		// SigHashSingle inputs can only be signed if there's a
+		// corresponding output. However this could be already signed,
+		// so we always verify the output.
+		if (hashType&txscript.SigHashSingle) !=
+			txscript.SigHashSingle || i < len(tx.TxOut) {
+
+			script, err := txscript.SignTxOutput(w.ChainParams(),
+				tx, i, prevOutScript, hashType, getKey,
+				getScript, txIn.SignatureScript)
+			// Failure to sign isn't an error, it just means that
+			// the tx isn't complete.
+			if err != nil {
+				signErrors = append(signErrors, SignatureError{
+					InputIndex: uint32(i),
+					Error:      err,
+				})
+				continue
+			}
+			txIn.SignatureScript = script
+		}
+
+		// Either it was already signed or we just signed it.
+		// Find out if it is completely satisfied or still needs more.
+		vm, err := txscript.NewEngine(prevOutScript, tx, i,
+			txscript.StandardVerifyFlags, nil)
+		if err == nil {
+			err = vm.Execute()
+		}
+		if err != nil {
+			signErrors = append(signErrors, SignatureError{
+				InputIndex: uint32(i),
+				Error:      err,
+			})
+		}
+	}
+
+	return signErrors, nil
+}
+
+// PublishTransaction sends the transaction to the consensus RPC server so it
+// can be propigated to other nodes and eventually mined.
+//
+// This function is unstable and will be removed once syncing code is moved out
+// of the wallet.
 func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	server, err := w.requireChainClient()
 	if err != nil {
@@ -1996,6 +2190,8 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	return err
 }
 
+// ChainParams returns the network parameters for the blockchain the wallet
+// belongs to.
 func (w *Wallet) ChainParams() *chaincfg.Params {
 	return w.chainParams
 }

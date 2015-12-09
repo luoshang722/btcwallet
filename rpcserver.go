@@ -30,7 +30,6 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	pb "github.com/btcsuite/btcwallet/rpc/walletrpc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -100,9 +99,9 @@ func generateRPCKeyPair() (tls.Certificate, error) {
 
 func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Server, error) {
 	var (
-		server       *grpc.Server      = nil
-		legacyServer *legacyrpc.Server = nil
-		legacyListen                   = net.Listen
+		server       *grpc.Server
+		legacyServer *legacyrpc.Server
+		legacyListen = net.Listen
 		keyPair      tls.Certificate
 		err          error
 	)
@@ -132,8 +131,7 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 			}
 			creds := credentials.NewServerTLSFromCert(&keyPair)
 			server = grpc.NewServer(grpc.Creds(creds))
-			loaderServer := rpcserver.NewLoaderServer(walletLoader, activeNet)
-			pb.RegisterWalletLoaderServiceServer(server, loaderServer)
+			rpcserver.StartWalletLoaderService(server, walletLoader, activeNet)
 			for _, lis := range listeners {
 				lis := lis
 				go func() {
@@ -240,8 +238,7 @@ func makeListeners(normalizedListenAddrs []string, listen listenFunc) []net.List
 // enables methods that require a loaded wallet.
 func startWalletRPCServices(wallet *wallet.Wallet, server *grpc.Server, legacyServer *legacyrpc.Server) {
 	if server != nil {
-		walletServer := rpcserver.NewServer(wallet)
-		pb.RegisterWalletServiceServer(server, walletServer)
+		rpcserver.StartWalletService(server, wallet)
 	}
 	if legacyServer != nil {
 		legacyServer.RegisterWallet(wallet)

@@ -219,7 +219,7 @@ func loadConfig() (*config, []string, error) {
 		ConfigFile:             defaultConfigFile,
 		DataDir:                defaultDataDir,
 		LogDir:                 defaultLogDir,
-		WalletPass:             wallet.DefaultPubPassphrase,
+		WalletPass:             wallet.InsecurePubPassphrase,
 		RPCKey:                 defaultRPCKeyFile,
 		RPCCert:                defaultRPCCertFile,
 		DisallowFree:           defaultDisallowFree,
