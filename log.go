@@ -51,7 +51,7 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"TMGR": txmgrLog,
 	"CHNS": chainLog,
 	"GRPC": grpcLog,
-	"LRPC": legacyRPCLog,
+	"RPCS": legacyRPCLog,
 }
 
 // logClosure is used to provide a closure over expensive logging operations
@@ -94,7 +94,7 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	case "GRPC":
 		grpcLog = logger
 		rpcserver.UseLogger(logger)
-	case "LRPC":
+	case "RPCS":
 		legacyRPCLog = logger
 		legacyrpc.UseLogger(logger)
 	}

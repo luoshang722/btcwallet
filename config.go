@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -85,17 +85,27 @@ type config struct {
 	ProxyPass        string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 
 	// RPC server options
-	RPCListeners     []string `long:"rpclisten" description:"Listen for RPC connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
-	RPCCert          string   `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey           string   `long:"rpckey" description:"File containing the certificate key"`
-	DisableServerTLS bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-
-	// Options specific to the legacy JSON-RPC server
-	LegacyRPCListeners     []string `long:"legacyrpclisten" description:"Listen for legacy RPC connections on this interface/port"`
-	LegacyRPCMaxClients    int64    `long:"legacyrpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
-	LegacyRPCMaxWebsockets int64    `long:"legacyrpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
+	//
+	// The legacy server is still enabled by default (and eventually will be
+	// replaced with the experimental server) so prepare for that change by
+	// renaming the struct fields (but not the configuration options).
+	//
+	// Usernames can also be used for the consensus RPC client, so they
+	// aren't considered legacy.
+	RPCCert                string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey                 string   `long:"rpckey" description:"File containing the certificate key"`
+	DisableServerTLS       bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
+	LegacyRPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
+	LegacyRPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
 	Username               string   `short:"u" long:"username" description:"Username for legacy RPC and btcd authentication (if btcdusername is unset)"`
 	Password               string   `short:"P" long:"password" default-mask:"-" description:"Password for legacy RPC and btcd authentication (if btcdpassword is unset)"`
+
+	// EXPERIMENTAL RPC server options
+	//
+	// These options will change (and require changes to config files, etc.)
+	// when the new gRPC server is enabled.
+	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
 
 	// Deprecated options
 	KeypoolSize uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
@@ -501,31 +511,24 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Only set default RPC listeners when there are no listeners set for
-	// the legacy RPC server.  This is required to prevent the new RPC
+	// the experimental RPC server.  This is required to prevent the old RPC
 	// server from sharing listen addresses, since it is impossible to
 	// remove defaults from go-flags slice options without assigning
 	// specific behavior to a particular string.
-	if len(cfg.RPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
+	if len(cfg.ExperimentalRPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
 		if err != nil {
 			return nil, nil, err
 		}
-		cfg.RPCListeners = make([]string, 0, len(addrs))
+		cfg.LegacyRPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
 			addr = net.JoinHostPort(addr, activeNet.RPCServerPort)
-			cfg.RPCListeners = append(cfg.RPCListeners, addr)
+			cfg.LegacyRPCListeners = append(cfg.LegacyRPCListeners, addr)
 		}
 	}
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
-	cfg.RPCListeners, err = cfgutil.NormalizeAddresses(cfg.RPCListeners,
-		activeNet.RPCServerPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"Invalid network address in RPC listeners: %v\n", err)
-		return nil, nil, err
-	}
 	cfg.LegacyRPCListeners, err = cfgutil.NormalizeAddresses(
 		cfg.LegacyRPCListeners, activeNet.RPCServerPort)
 	if err != nil {
@@ -533,14 +536,21 @@ func loadConfig() (*config, []string, error) {
 			"Invalid network address in legacy RPC listeners: %v\n", err)
 		return nil, nil, err
 	}
+	cfg.ExperimentalRPCListeners, err = cfgutil.NormalizeAddresses(
+		cfg.ExperimentalRPCListeners, activeNet.RPCServerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid network address in RPC listeners: %v\n", err)
+		return nil, nil, err
+	}
 
 	// Both RPC servers may not listen on the same interface/port.
-	if len(cfg.RPCListeners) > 0 && len(cfg.LegacyRPCListeners) > 0 {
-		seenAddresses := make(map[string]struct{}, len(cfg.RPCListeners))
-		for _, addr := range cfg.RPCListeners {
+	if len(cfg.LegacyRPCListeners) > 0 && len(cfg.ExperimentalRPCListeners) > 0 {
+		seenAddresses := make(map[string]struct{}, len(cfg.LegacyRPCListeners))
+		for _, addr := range cfg.LegacyRPCListeners {
 			seenAddresses[addr] = struct{}{}
 		}
-		for _, addr := range cfg.LegacyRPCListeners {
+		for _, addr := range cfg.ExperimentalRPCListeners {
 			_, seen := seenAddresses[addr]
 			if seen {
 				err := fmt.Errorf("Address `%s` may not be "+
@@ -555,7 +565,8 @@ func loadConfig() (*config, []string, error) {
 	// Only allow server TLS to be disabled if the RPC server is bound to
 	// localhost addresses.
 	if cfg.DisableServerTLS {
-		allListeners := append(cfg.RPCListeners, cfg.LegacyRPCListeners...)
+		allListeners := append(cfg.LegacyRPCListeners,
+			cfg.ExperimentalRPCListeners...)
 		for _, addr := range allListeners {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
