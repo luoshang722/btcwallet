@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -31,10 +31,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/websocket"
 )
@@ -75,7 +73,7 @@ type Server struct {
 	httpServer    http.Server
 	wallet        *wallet.Wallet
 	walletLoader  *wallet.Loader
-	chainClient   *chain.RPCClient
+	chainClient   *rpcsvc.SynchronizationService
 	handlerLookup func(string) (requestHandler, bool)
 	handlerMu     sync.Mutex
 
@@ -85,32 +83,6 @@ type Server struct {
 
 	maxPostClients      int64 // Max concurrent HTTP POST clients.
 	maxWebsocketClients int64 // Max concurrent websocket clients.
-
-	// Channels to register or unregister a websocket client for
-	// websocket notifications.
-	registerWSC   chan *websocketClient
-	unregisterWSC chan *websocketClient
-
-	// Channels read from other components from which notifications are
-	// created.
-	connectedBlocks    <-chan wtxmgr.BlockMeta
-	disconnectedBlocks <-chan wtxmgr.BlockMeta
-	relevantTxs        <-chan chain.RelevantTx
-	managerLocked      <-chan bool
-	confirmedBalance   <-chan btcutil.Amount
-	unconfirmedBalance <-chan btcutil.Amount
-	//chainServerConnected  <-chan bool
-	registerWalletNtfns chan struct{}
-
-	// enqueueNotification and dequeueNotification handle both sides of an
-	// infinitly growing queue for websocket client notifications.
-	enqueueNotification chan wsClientNotification
-	dequeueNotification chan wsClientNotification
-
-	// notificationHandlerQuit is closed when the notification handler
-	// goroutine shuts down.  After this is closed, no more notifications
-	// will be sent to any websocket client response channel.
-	notificationHandlerQuit chan struct{}
 
 	wg      sync.WaitGroup
 	quit    chan struct{}
@@ -144,12 +116,6 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		registerWSC:             make(chan *websocketClient),
-		unregisterWSC:           make(chan *websocketClient),
-		registerWalletNtfns:     make(chan struct{}),
-		enqueueNotification:     make(chan wsClientNotification),
-		dequeueNotification:     make(chan wsClientNotification),
-		notificationHandlerQuit: make(chan struct{}),
 		quit:                make(chan struct{}),
 		requestShutdownChan: make(chan struct{}, 1),
 	}
@@ -197,11 +163,6 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 			server.websocketClientRPC(wsc)
 		}))
 
-	server.wg.Add(3)
-	go server.notificationListener()
-	go server.notificationQueue()
-	go server.notificationHandler()
-
 	for _, lis := range listeners {
 		server.serve(lis)
 	}
@@ -246,13 +207,12 @@ func (s *Server) serve(lis net.Listener) {
 func (s *Server) RegisterWallet(w *wallet.Wallet) {
 	s.handlerMu.Lock()
 	s.wallet = w
-	s.registerWalletNtfns <- struct{}{}
 	s.handlerMu.Unlock()
 }
 
 // Stop gracefully shuts down the rpc server by stopping and disconnecting all
-// clients, disconnecting the chain server connection, and closing the wallet's
-// account files.  This blocks until shutdown completes.
+// clients and stopping all server goroutines.  The synchronization service (if
+// any) and wallet are not stopped by this function.
 func (s *Server) Stop() {
 	s.quitMtx.Lock()
 	select {
@@ -260,18 +220,6 @@ func (s *Server) Stop() {
 		s.quitMtx.Unlock()
 		return
 	default:
-	}
-
-	// Stop the connected wallet and chain server, if any.
-	s.handlerMu.Lock()
-	wallet := s.wallet
-	chainClient := s.chainClient
-	s.handlerMu.Unlock()
-	if wallet != nil {
-		wallet.Stop()
-	}
-	if chainClient != nil {
-		chainClient.Stop()
 	}
 
 	// Stop all the listeners.
@@ -287,15 +235,6 @@ func (s *Server) Stop() {
 	close(s.quit)
 	s.quitMtx.Unlock()
 
-	// First wait for the wallet and chain server to stop, if they
-	// were ever set.
-	if wallet != nil {
-		wallet.WaitForShutdown()
-	}
-	if chainClient != nil {
-		chainClient.WaitForShutdown()
-	}
-
 	// Wait for all remaining goroutines to exit.
 	s.wg.Wait()
 }
@@ -304,7 +243,7 @@ func (s *Server) Stop() {
 // functional bitcoin wallet RPC server.  This can be called to enable RPC
 // passthrough even before a loaded wallet is set, but the wallet's RPC client
 // is preferred.
-func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
+func (s *Server) SetChainServer(chainClient *rpcsvc.SynchronizationService) {
 	s.handlerMu.Lock()
 	s.chainClient = chainClient
 	s.handlerMu.Unlock()
@@ -322,10 +261,6 @@ func (s *Server) handlerClosure(request *btcjson.Request) lazyHandler {
 	// With the lock held, make copies of these pointers for the closure.
 	wallet := s.wallet
 	chainClient := s.chainClient
-	if wallet != nil && chainClient == nil {
-		chainClient = wallet.ChainClient()
-		s.chainClient = chainClient
-	}
 	s.handlerMu.Unlock()
 
 	return lazyApplyHandler(request, wallet, chainClient)
@@ -542,16 +477,6 @@ out:
 		}
 	}
 
-	// Remove websocket client from notification group, or if the server is
-	// shutting down, wait until the notification handler has finished
-	// running.  This is needed to ensure that no more notifications will be
-	// sent to the client's responses chan before it's closed below.
-	select {
-	case s.unregisterWSC <- wsc:
-	case <-s.quit:
-		<-s.notificationHandlerQuit
-	}
-
 	// allow client to disconnect after all handler goroutines are done
 	wsc.wg.Wait()
 	close(wsc.responses)
@@ -590,8 +515,8 @@ out:
 	s.wg.Done()
 }
 
-// websocketClientRPC starts the goroutines to serve JSON-RPC requests and
-// notifications over a websocket connection for a single client.
+// websocketClientRPC starts the goroutines to serve JSON-RPC requests over a
+// websocket connection for a single client.
 func (s *Server) websocketClientRPC(wsc *websocketClient) {
 	log.Infof("New websocket client %s", wsc.remoteAddr)
 
@@ -599,14 +524,6 @@ func (s *Server) websocketClientRPC(wsc *websocketClient) {
 	// the connection.
 	if err := wsc.conn.SetReadDeadline(time.Time{}); err != nil {
 		log.Warnf("Cannot remove read deadline: %v", err)
-	}
-
-	// Add client context so notifications duplicated to each
-	// client are received by this client.
-	select {
-	case s.registerWSC <- wsc:
-	case <-s.quit:
-		return
 	}
 
 	// WebsocketClientRead is intentionally not run with the waitgroup
@@ -703,262 +620,4 @@ func (s *Server) requestProcessShutdown() {
 // client requests remote shutdown.
 func (s *Server) RequestProcessShutdown() <-chan struct{} {
 	return s.requestShutdownChan
-}
-
-// Notification messages for websocket clients.
-type (
-	wsClientNotification interface {
-		// This returns a slice only because some of these types result
-		// in multpile client notifications.
-		notificationCmds(w *wallet.Wallet) []interface{}
-	}
-
-	blockConnected    wtxmgr.BlockMeta
-	blockDisconnected wtxmgr.BlockMeta
-
-	relevantTx chain.RelevantTx
-
-	managerLocked bool
-
-	confirmedBalance   btcutil.Amount
-	unconfirmedBalance btcutil.Amount
-
-	btcdConnected bool
-)
-
-func (b blockConnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewBlockConnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix())
-	return []interface{}{n}
-}
-
-func (b blockDisconnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewBlockDisconnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix())
-	return []interface{}{n}
-}
-
-func (t relevantTx) notificationCmds(w *wallet.Wallet) []interface{} {
-	syncBlock := w.Manager.SyncedTo()
-
-	var block *wtxmgr.Block
-	if t.Block != nil {
-		block = &t.Block.Block
-	}
-	details, err := w.TxStore.UniqueTxDetails(&t.TxRecord.Hash, block)
-	if err != nil {
-		log.Errorf("Cannot fetch transaction details for "+
-			"client notification: %v", err)
-		return nil
-	}
-	if details == nil {
-		log.Errorf("No details found for client transaction notification")
-		return nil
-	}
-
-	ltr := wallet.ListTransactions(details, syncBlock.Height, w.ChainParams())
-	ntfns := make([]interface{}, len(ltr))
-	for i := range ntfns {
-		ntfns[i] = btcjson.NewNewTxNtfn(ltr[i].Account, ltr[i])
-	}
-	return ntfns
-}
-
-func (l managerLocked) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewWalletLockStateNtfn(bool(l))
-	return []interface{}{n}
-}
-
-func (b confirmedBalance) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewAccountBalanceNtfn("",
-		btcutil.Amount(b).ToBTC(), true)
-	return []interface{}{n}
-}
-
-func (b unconfirmedBalance) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewAccountBalanceNtfn("",
-		btcutil.Amount(b).ToBTC(), false)
-	return []interface{}{n}
-}
-
-func (b btcdConnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewBtcdConnectedNtfn(bool(b))
-	return []interface{}{n}
-}
-
-func (s *Server) notificationListener() {
-out:
-	for {
-		select {
-		case n := <-s.connectedBlocks:
-			s.enqueueNotification <- blockConnected(n)
-		case n := <-s.disconnectedBlocks:
-			s.enqueueNotification <- blockDisconnected(n)
-		case n := <-s.relevantTxs:
-			s.enqueueNotification <- relevantTx(n)
-		case n := <-s.managerLocked:
-			s.enqueueNotification <- managerLocked(n)
-		case n := <-s.confirmedBalance:
-			s.enqueueNotification <- confirmedBalance(n)
-		case n := <-s.unconfirmedBalance:
-			s.enqueueNotification <- unconfirmedBalance(n)
-
-		// Registration of all notifications is done by the handler so
-		// it doesn't require another Server mutex.
-		case <-s.registerWalletNtfns:
-			connectedBlocks, err := s.wallet.ListenConnectedBlocks()
-			if err != nil {
-				log.Errorf("Could not register for new "+
-					"connected block notifications: %v",
-					err)
-				continue
-			}
-			disconnectedBlocks, err := s.wallet.ListenDisconnectedBlocks()
-			if err != nil {
-				log.Errorf("Could not register for new "+
-					"disconnected block notifications: %v",
-					err)
-				continue
-			}
-			relevantTxs, err := s.wallet.ListenRelevantTxs()
-			if err != nil {
-				log.Errorf("Could not register for new relevant "+
-					"transaction notifications: %v", err)
-				continue
-			}
-			managerLocked, err := s.wallet.ListenLockStatus()
-			if err != nil {
-				log.Errorf("Could not register for manager "+
-					"lock state changes: %v", err)
-				continue
-			}
-			confirmedBalance, err := s.wallet.ListenConfirmedBalance()
-			if err != nil {
-				log.Errorf("Could not register for confirmed "+
-					"balance changes: %v", err)
-				continue
-			}
-			unconfirmedBalance, err := s.wallet.ListenUnconfirmedBalance()
-			if err != nil {
-				log.Errorf("Could not register for unconfirmed "+
-					"balance changes: %v", err)
-				continue
-			}
-			s.connectedBlocks = connectedBlocks
-			s.disconnectedBlocks = disconnectedBlocks
-			s.relevantTxs = relevantTxs
-			s.managerLocked = managerLocked
-			s.confirmedBalance = confirmedBalance
-			s.unconfirmedBalance = unconfirmedBalance
-
-		case <-s.quit:
-			break out
-		}
-	}
-	close(s.enqueueNotification)
-	go s.drainNotifications()
-	s.wg.Done()
-}
-
-func (s *Server) drainNotifications() {
-	for {
-		select {
-		case <-s.connectedBlocks:
-		case <-s.disconnectedBlocks:
-		case <-s.relevantTxs:
-		case <-s.managerLocked:
-		case <-s.confirmedBalance:
-		case <-s.unconfirmedBalance:
-		case <-s.registerWalletNtfns:
-		}
-	}
-}
-
-// notificationQueue manages an infinitly-growing queue of notifications that
-// wallet websocket clients may be interested in.  It quits when the
-// enqueueNotification channel is closed, dropping any still pending
-// notifications.
-func (s *Server) notificationQueue() {
-	var q []wsClientNotification
-	var dequeue chan<- wsClientNotification
-	skipQueue := s.dequeueNotification
-	var next wsClientNotification
-out:
-	for {
-		select {
-		case n, ok := <-s.enqueueNotification:
-			if !ok {
-				// Sender closed input channel.
-				break out
-			}
-
-			// Either send to out immediately if skipQueue is
-			// non-nil (queue is empty) and reader is ready,
-			// or append to the queue and send later.
-			select {
-			case skipQueue <- n:
-			default:
-				q = append(q, n)
-				dequeue = s.dequeueNotification
-				skipQueue = nil
-				next = q[0]
-			}
-
-		case dequeue <- next:
-			q[0] = nil // avoid leak
-			q = q[1:]
-			if len(q) == 0 {
-				dequeue = nil
-				skipQueue = s.dequeueNotification
-			} else {
-				next = q[0]
-			}
-		}
-	}
-	close(s.dequeueNotification)
-	s.wg.Done()
-}
-
-func (s *Server) notificationHandler() {
-	clients := make(map[chan struct{}]*websocketClient)
-out:
-	for {
-		select {
-		case c := <-s.registerWSC:
-			clients[c.quit] = c
-
-		case c := <-s.unregisterWSC:
-			delete(clients, c.quit)
-
-		case nmsg, ok := <-s.dequeueNotification:
-			// No more notifications.
-			if !ok {
-				break out
-			}
-
-			// Ignore if there are no clients to receive the
-			// notification.
-			if len(clients) == 0 {
-				continue
-			}
-
-			ns := nmsg.notificationCmds(s.wallet)
-			for _, n := range ns {
-				mn, err := btcjson.MarshalCmd(nil, n)
-				// All notifications are expected to be
-				// marshalable.
-				if err != nil {
-					panic(err)
-				}
-				for _, c := range clients {
-					if err := c.send(mn); err != nil {
-						delete(clients, c.quit)
-					}
-				}
-			}
-
-		case <-s.quit:
-			break out
-		}
-	}
-	close(s.notificationHandlerQuit)
-	s.wg.Done()
 }

@@ -22,9 +22,9 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
@@ -39,7 +39,7 @@ var (
 	log          = btclog.Disabled
 	walletLog    = btclog.Disabled
 	txmgrLog     = btclog.Disabled
-	chainLog     = btclog.Disabled
+	rpcsvcLog    = btclog.Disabled
 	grpcLog      = btclog.Disabled
 	legacyRPCLog = btclog.Disabled
 )
@@ -49,7 +49,7 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"BTCW": log,
 	"WLLT": walletLog,
 	"TMGR": txmgrLog,
-	"CHNS": chainLog,
+	"CHNS": rpcsvcLog,
 	"GRPC": grpcLog,
 	"RPCS": legacyRPCLog,
 }

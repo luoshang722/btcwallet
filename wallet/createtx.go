@@ -131,7 +131,6 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // address. InsufficientFundsError is returned if there are not enough
 // eligible unspent outputs to create the transaction.
 func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minconf int32) (*CreatedTx, error) {
-
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
@@ -141,23 +140,17 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minc
 	}
 	defer heldUnlock.Release()
 
-	chainClient, err := w.requireChainClient()
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	syncBlock := w.Manager.SyncedTo()
+
+	eligible, err := w.findEligibleOutputs(account, minconf, &syncBlock)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
-	if err != nil {
-		return nil, err
-	}
-
-	eligible, err := w.findEligibleOutputs(account, minconf, bs)
-	if err != nil {
-		return nil, err
-	}
-
-	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, account, w.NewChangeAddress, w.chainParams, w.DisallowFree)
+	return createTx(eligible, pairs, &syncBlock, w.FeeIncrement, w.Manager,
+		account, w.NewChangeAddress, w.chainParams, w.DisallowFree)
 }
 
 // createTx selects inputs (from the given slice of eligible utxos)

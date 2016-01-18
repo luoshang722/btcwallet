@@ -283,10 +283,8 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 
 	// For now (until notification coalescing isn't necessary) just use
 	// chain length to determine if this is the new best block.
-	if s.wallet.ChainSynced() {
-		if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
-			return
-		}
+	if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
+		return
 	}
 
 	defer s.mu.Unlock()

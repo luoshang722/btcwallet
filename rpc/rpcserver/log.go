@@ -23,9 +23,12 @@ import (
 	"github.com/btcsuite/btclog"
 )
 
+var log = btclog.Disabled
+
 // UseLogger sets the logger to use for the gRPC server.
 func UseLogger(l btclog.Logger) {
 	grpclog.SetLogger(logger{l})
+	log = l
 }
 
 // logger uses a btclog.Logger to implement the grpclog.Logger interface.
