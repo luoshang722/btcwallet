@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -27,8 +27,10 @@ import (
 
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
+	"github.com/btcsuite/btcwallet/rpc/rpcserver"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -86,7 +88,7 @@ func walletMain() error {
 	// Create and start chain RPC client so it's ready to connect to
 	// the wallet when loaded later.
 	if !cfg.NoInitialLoad {
-		go rpcClientConnectLoop(legacyRPCServer, loader)
+		go rpcClientConnectLoop(rpcs, legacyRPCServer, loader)
 	}
 
 	var closeDB func() error
@@ -99,7 +101,9 @@ func walletMain() error {
 		}
 	}()
 	loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
-		startWalletRPCServices(w, rpcs, legacyRPCServer)
+		if legacyRPCServer != nil {
+			legacyRPCServer.RegisterWallet(w)
+		}
 		closeDB = db.Close
 	})
 
@@ -116,14 +120,15 @@ func walletMain() error {
 	// Shutdown the server(s) when interrupt signal is received.
 	if rpcs != nil {
 		addInterruptHandler(func() {
-			// TODO: Does this need to wait for the grpc server to
-			// finish up any requests?
 			log.Warn("Stopping RPC server...")
 			rpcs.Stop()
 			log.Info("RPC server shutdown")
 		})
 	}
 	if legacyRPCServer != nil {
+		// The legacy RPC server is able to request process shutdown by
+		// means of the 'stop' RPC.  If this is triggered, execute
+		// shutdown as it would happen due to an interrupt.
 		go func() {
 			<-legacyRPCServer.RequestProcessShutdown()
 			simulateInterrupt()
@@ -144,11 +149,12 @@ func walletMain() error {
 // server.  When a connection is established, the client is used to sync the
 // loaded wallet, either immediately or when loaded at a later time.
 //
-// The legacy RPC is optional.  If set, the connected RPC client will be
+// The RPC servers are optional.  If set, the connected RPC client will be
 // associated with the server for RPC passthrough and to enable additional
 // methods.
-func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
+func rpcClientConnectLoop(server *grpc.Server, legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
 	certs := readCAFile()
+	var walletServer *rpcserver.WalletServer
 
 	for {
 		chainClient, err := startChainRPC(certs)
@@ -165,6 +171,14 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 		// mutex is used to make this concurrent safe.
 		associateRPCClient := func(w *wallet.Wallet) {
 			w.SynchronizeRPC(chainClient)
+			if server != nil {
+				if walletServer == nil {
+					walletServer = rpcserver.RegisterWalletService(
+						server, w, chainClient)
+				} else {
+					walletServer.SetRPCClient(chainClient)
+				}
+			}
 			if legacyRPCServer != nil {
 				legacyRPCServer.SetChainServer(chainClient)
 			}
