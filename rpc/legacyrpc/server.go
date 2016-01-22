@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/websocket"
@@ -61,7 +61,7 @@ type Server struct {
 	httpServer    http.Server
 	wallet        *wallet.Wallet
 	walletLoader  *wallet.Loader
-	chainClient   *chain.RPCClient
+	chainClient   *rpcsvc.SynchronizationService
 	handlerLookup func(string) (requestHandler, bool)
 	handlerMu     sync.Mutex
 
@@ -205,8 +205,8 @@ func (s *Server) RegisterWallet(w *wallet.Wallet) {
 }
 
 // Stop gracefully shuts down the rpc server by stopping and disconnecting all
-// clients, disconnecting the chain server connection, and closing the wallet's
-// account files.  This blocks until shutdown completes.
+// clients and stopping all server goroutines.  The synchronization service (if
+// any) and wallet are not stopped by this function.
 func (s *Server) Stop() {
 	s.quitMtx.Lock()
 	select {
@@ -214,18 +214,6 @@ func (s *Server) Stop() {
 		s.quitMtx.Unlock()
 		return
 	default:
-	}
-
-	// Stop the connected wallet and chain server, if any.
-	s.handlerMu.Lock()
-	wallet := s.wallet
-	chainClient := s.chainClient
-	s.handlerMu.Unlock()
-	if wallet != nil {
-		wallet.Stop()
-	}
-	if chainClient != nil {
-		chainClient.Stop()
 	}
 
 	// Stop all the listeners.
@@ -241,15 +229,6 @@ func (s *Server) Stop() {
 	close(s.quit)
 	s.quitMtx.Unlock()
 
-	// First wait for the wallet and chain server to stop, if they
-	// were ever set.
-	if wallet != nil {
-		wallet.WaitForShutdown()
-	}
-	if chainClient != nil {
-		chainClient.WaitForShutdown()
-	}
-
 	// Wait for all remaining goroutines to exit.
 	s.wg.Wait()
 }
@@ -258,7 +237,7 @@ func (s *Server) Stop() {
 // functional bitcoin wallet RPC server.  This can be called to enable RPC
 // passthrough even before a loaded wallet is set, but the wallet's RPC client
 // is preferred.
-func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
+func (s *Server) SetChainServer(chainClient *rpcsvc.SynchronizationService) {
 	s.handlerMu.Lock()
 	s.chainClient = chainClient
 	s.handlerMu.Unlock()
@@ -276,10 +255,6 @@ func (s *Server) handlerClosure(request *btcjson.Request) lazyHandler {
 	// With the lock held, make copies of these pointers for the closure.
 	wallet := s.wallet
 	chainClient := s.chainClient
-	if wallet != nil && chainClient == nil {
-		chainClient = wallet.ChainClient()
-		s.chainClient = chainClient
-	}
 	s.handlerMu.Unlock()
 
 	return lazyApplyHandler(request, wallet, chainClient)

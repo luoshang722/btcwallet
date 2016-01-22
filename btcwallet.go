@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -13,9 +13,11 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
+	"github.com/btcsuite/btcwallet/rpc/rpcserver"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/wallet"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -76,11 +78,13 @@ func walletMain() error {
 	// Create and start chain RPC client so it's ready to connect to
 	// the wallet when loaded later.
 	if !cfg.NoInitialLoad {
-		go rpcClientConnectLoop(legacyRPCServer, loader)
+		go rpcClientConnectLoop(rpcs, legacyRPCServer, loader)
 	}
 
 	loader.RunAfterLoad(func(w *wallet.Wallet) {
-		startWalletRPCServices(w, rpcs, legacyRPCServer)
+		if legacyRPCServer != nil {
+			legacyRPCServer.RegisterWallet(w)
+		}
 	})
 
 	if !cfg.NoInitialLoad {
@@ -104,8 +108,6 @@ func walletMain() error {
 	})
 	if rpcs != nil {
 		addInterruptHandler(func() {
-			// TODO: Does this need to wait for the grpc server to
-			// finish up any requests?
 			log.Warn("Stopping RPC server...")
 			rpcs.Stop()
 			log.Info("RPC server shutdown")
@@ -117,6 +119,9 @@ func walletMain() error {
 			legacyRPCServer.Stop()
 			log.Info("Legacy RPC server shutdown")
 		})
+		// The legacy RPC server is able to request process shutdown by
+		// means of the 'stop' RPC.  If this is triggered, execute
+		// shutdown as it would happen due to an interrupt.
 		go func() {
 			<-legacyRPCServer.RequestProcessShutdown()
 			simulateInterrupt()
@@ -132,11 +137,12 @@ func walletMain() error {
 // server.  When a connection is established, the client is used to sync the
 // loaded wallet, either immediately or when loaded at a later time.
 //
-// The legacy RPC is optional.  If set, the connected RPC client will be
+// The RPC servers are optional.  If set, the connected RPC client will be
 // associated with the server for RPC passthrough and to enable additional
 // methods.
-func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
+func rpcClientConnectLoop(server *grpc.Server, legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
 	certs := readCAFile()
+	var walletServer *rpcserver.WalletServer
 
 	for {
 		chainClient, err := startChainRPC(certs)
@@ -153,6 +159,14 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 		// mutex is used to make this concurrent safe.
 		associateRPCClient := func(w *wallet.Wallet) {
 			w.SynchronizeRPC(chainClient)
+			if server != nil {
+				if walletServer == nil {
+					walletServer = rpcserver.RegisterWalletService(
+						server, w, chainClient)
+				} else {
+					walletServer.SetRPCClient(chainClient)
+				}
+			}
 			if legacyRPCServer != nil {
 				legacyRPCServer.SetChainServer(chainClient)
 			}
@@ -209,19 +223,4 @@ func readCAFile() []byte {
 	}
 
 	return certs
-}
-
-// startChainRPC opens a RPC client connection to a btcd server for blockchain
-// services.  This function uses the RPC options from the global config and
-// there is no recovery in case the server is not available or if there is an
-// authentication error.  Instead, all requests to the client will simply error.
-func startChainRPC(certs []byte) (*chain.RPCClient, error) {
-	log.Infof("Attempting RPC client connection to %v", cfg.RPCConnect)
-	rpcc, err := chain.NewRPCClient(activeNet.Params, cfg.RPCConnect,
-		cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS, 0)
-	if err != nil {
-		return nil, err
-	}
-	err = rpcc.Start()
-	return rpcc, err
 }

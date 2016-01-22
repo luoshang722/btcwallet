@@ -21,7 +21,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -61,7 +61,7 @@ func confirms(txHeight, curHeight int32) int32 {
 type requestHandler func(interface{}, *wallet.Wallet) (interface{}, error)
 
 // requestHandlerChain is a requestHandler that also takes a parameter for
-type requestHandlerChainRequired func(interface{}, *wallet.Wallet, *chain.RPCClient) (interface{}, error)
+type requestHandlerChainRequired func(interface{}, *wallet.Wallet, *rpcsvc.SynchronizationService) (interface{}, error)
 
 var rpcHandlers = map[string]struct {
 	handler          requestHandler
@@ -105,8 +105,8 @@ var rpcHandlers = map[string]struct {
 	"listunspent":            {handler: ListUnspent},
 	"lockunspent":            {handler: LockUnspent},
 	"sendfrom":               {handlerWithChain: SendFrom},
-	"sendmany":               {handler: SendMany},
-	"sendtoaddress":          {handler: SendToAddress},
+	"sendmany":               {handlerWithChain: SendMany},
+	"sendtoaddress":          {handlerWithChain: SendToAddress},
 	"settxfee":               {handler: SetTxFee},
 	"signmessage":            {handler: SignMessage},
 	"signrawtransaction":     {handlerWithChain: SignRawTransaction},
@@ -171,7 +171,7 @@ type lazyHandler func() (interface{}, *btcjson.RPCError)
 // returning a closure that will execute it with the (required) wallet and
 // (optional) consensus RPC server.  If no handlers are found and the
 // chainClient is not nil, the returned handler performs RPC passthrough.
-func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *chain.RPCClient) lazyHandler {
+func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) lazyHandler {
 	handlerData, ok := rpcHandlers[request.Method]
 	if ok && handlerData.handlerWithChain != nil && w != nil && chainClient != nil {
 		return func() (interface{}, *btcjson.RPCError) {
@@ -208,7 +208,8 @@ func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *c
 				Message: "Chain RPC is inactive",
 			}
 		}
-		resp, err := chainClient.RawRequest(request.Method, request.Params)
+		rpcClient := chainClient.RPCClient()
+		resp, err := rpcClient.RawRequest(request.Method, request.Params)
 		if err != nil {
 			return nil, jsonError(err)
 		}
@@ -495,10 +496,10 @@ func GetBlockCount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // GetInfo handles a getinfo request by returning the a structure containing
 // information about the current state of btcwallet.
 // exist.
-func GetInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func GetInfo(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	// Call down to btcd for all of the information in this command known
 	// by them.
-	info, err := chainClient.GetInfo()
+	info, err := chainClient.RPCClient().GetInfo()
 	if err != nil {
 		return nil, err
 	}
@@ -957,7 +958,7 @@ var helpDescsMu sync.Mutex // Help may execute concurrently, so synchronize acce
 // associated with a consensus RPC client.  The additional RPC client is used to
 // include help messages for methods implemented by the consensus server via RPC
 // passthrough.
-func HelpWithChainRPC(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func HelpWithChainRPC(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	return help(icmd, w, chainClient)
 }
 
@@ -972,7 +973,7 @@ func HelpNoChainRPC(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // methods, or full help for a specific method.  The chainClient is optional,
 // and this is simply a helper function for the HelpNoChainRPC and
 // HelpWithChainRPC handlers.
-func help(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func help(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.HelpCmd)
 
 	// btcd returns different help messages depending on the kind of
@@ -1232,8 +1233,9 @@ func ListReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 
 // ListSinceBlock handles a listsinceblock request by returning an array of maps
 // with details of sent and received wallet transactions since the given block.
-func ListSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func ListSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListSinceBlockCmd)
+	rpcClient := chainClient.RPCClient()
 
 	syncBlock := w.Manager.SyncedTo()
 	targetConf := int64(*cmd.TargetConfirmations)
@@ -1241,7 +1243,7 @@ func ListSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 	// For the result we need the block hash for the last block counted
 	// in the blockchain due to confirmations. We send this off now so that
 	// it can arrive asynchronously while we figure out the rest.
-	gbh := chainClient.GetBlockHashAsync(int64(syncBlock.Height) + 1 - targetConf)
+	gbh := rpcClient.GetBlockHashAsync(int64(syncBlock.Height) + 1 - targetConf)
 
 	var start int32
 	if cmd.BlockHash != nil {
@@ -1249,7 +1251,7 @@ func ListSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
-		block, err := chainClient.GetBlockVerbose(hash, false)
+		block, err := rpcClient.GetBlockVerbose(hash, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1410,13 +1412,16 @@ func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) 
 // sendPairs creates and sends payment transactions.
 // It returns the transaction hash in string format upon success
 // All errors are returned in btcjson.RPCError format
-func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
+func sendPairs(w *wallet.Wallet, s *rpcsvc.SynchronizationService,
+	amounts map[string]btcutil.Amount,
 	account uint32, minconf int32) (string, error) {
+
+	// TODO: need a way to synchronize these calls to prevent double spends.
 	outputs, err := makeOutputs(amounts, w.ChainParams())
 	if err != nil {
 		return "", err
 	}
-	txSha, err := w.SendOutputs(outputs, account, minconf)
+	tx, err := w.TxToOutputs(outputs, account, minconf)
 	if err != nil {
 		if err == txrules.ErrAmountNegative {
 			return "", ErrNeedPositiveAmount
@@ -1424,17 +1429,16 @@ func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			return "", &ErrWalletUnlockNeeded
 		}
-		switch err.(type) {
-		case btcjson.RPCError:
-			return "", err
-		}
-
 		return "", &btcjson.RPCError{
 			Code:    btcjson.ErrRPCInternal.Code,
 			Message: err.Error(),
 		}
 	}
 
+	txSha, err := s.RPCClient().SendRawTransaction(tx, false)
+	if err != nil {
+		return "", err
+	}
 	txShaStr := txSha.String()
 	log.Infof("Successfully sent transaction %v", txShaStr)
 	return txShaStr, nil
@@ -1449,7 +1453,7 @@ func isNilOrEmpty(s *string) bool {
 // address.  Leftover inputs not sent to the payment address or a fee for
 // the miner are sent back to a new address in the wallet.  Upon success,
 // the TxID for the created transaction is returned.
-func SendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func SendFrom(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.SendFromCmd)
 
 	// Transaction comments are not yet supported.  Error instead of
@@ -1483,7 +1487,7 @@ func SendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) 
 		cmd.ToAddress: amt,
 	}
 
-	return sendPairs(w, pairs, account, minConf)
+	return sendPairs(w, chainClient, pairs, account, minConf)
 }
 
 // SendMany handles a sendmany RPC request by creating a new transaction
@@ -1491,7 +1495,7 @@ func SendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) 
 // payment addresses.  Leftover inputs not sent to the payment address
 // or a fee for the miner are sent back to a new address in the wallet.
 // Upon success, the TxID for the created transaction is returned.
-func SendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+func SendMany(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.SendManyCmd)
 
 	// Transaction comments are not yet supported.  Error instead of
@@ -1524,7 +1528,7 @@ func SendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		pairs[k] = amt
 	}
 
-	return sendPairs(w, pairs, account, minConf)
+	return sendPairs(w, chainClient, pairs, account, minConf)
 }
 
 // SendToAddress handles a sendtoaddress RPC request by creating a new
@@ -1532,7 +1536,7 @@ func SendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // payment address.  Leftover inputs not sent to the payment address or a fee
 // for the miner are sent back to a new address in the wallet.  Upon success,
 // the TxID for the created transaction is returned.
-func SendToAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+func SendToAddress(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.SendToAddressCmd)
 
 	// Transaction comments are not yet supported.  Error instead of
@@ -1560,7 +1564,7 @@ func SendToAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	// sendtoaddress always spends from the default account, this matches bitcoind
-	return sendPairs(w, pairs, waddrmgr.DefaultAccountNum, 1)
+	return sendPairs(w, chainClient, pairs, waddrmgr.DefaultAccountNum, 1)
 }
 
 // SetTxFee sets the transaction fee per kilobyte added to transactions.
@@ -1630,7 +1634,7 @@ type pendingTx struct {
 }
 
 // SignRawTransaction handles the signrawtransaction command.
-func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *rpcsvc.SynchronizationService) (interface{}, error) {
 	cmd := icmd.(*btcjson.SignRawTransactionCmd)
 
 	serializedTx, err := decodeHexStr(cmd.RawTx)
@@ -1732,7 +1736,7 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		// Never heard of this one before, request it.
 		prevHash := &txIn.PreviousOutPoint.Hash
 		requested[txIn.PreviousOutPoint.Hash] = &pendingTx{
-			resp:   chainClient.GetRawTransactionAsync(prevHash),
+			resp:   chainClient.RPCClient().GetRawTransactionAsync(prevHash),
 			inputs: []uint32{txIn.PreviousOutPoint.Index},
 		}
 	}

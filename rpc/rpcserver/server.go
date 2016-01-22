@@ -31,11 +31,11 @@ import (
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	pb "github.com/btcsuite/btcwallet/rpc/walletrpc"
+	"github.com/btcsuite/btcwallet/rpcsvc"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -105,15 +105,52 @@ type versionServer struct {
 // walletServer provides wallet services for RPC clients.
 type walletServer struct {
 	wallet *wallet.Wallet
+
+	// This will be replaced with a more generic syncing service in future
+	// commits.  The sync service initially may be initialized with nil when
+	// the wallet service is instantiated and the wallet service may be
+	// associated with a sync service at a later time.
+	syncSvc   *rpcsvc.SynchronizationService
+	syncSvcMu sync.Mutex
+}
+
+// WalletServer provides wallet services for RPC clients.  This type is exported
+// by the package to provide callers with the ability to modify the
+// underlying RPC client used for network services and synchronization.
+type WalletServer walletServer
+
+// requireSynchronizationService returns the wallet service's associated network
+// synchronization service if it exists, or an error otherwise.
+func (s *walletServer) requireSynchronizationService() (*rpcsvc.SynchronizationService, error) {
+	s.syncSvcMu.Lock()
+	syncSvc := s.syncSvc
+	s.syncSvcMu.Unlock()
+	if syncSvc == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"The wallet service is not associated with a synchronization service")
+	}
+	return syncSvc, nil
+}
+
+// SetSynchronizationService associates the server with a network
+// synchronization service.  This does not synchronize the wallet with the new
+// service, but all wallet requests that make use of the synchronization service
+// will use this new service instead.
+func (s *WalletServer) SetSynchronizationService(syncSvc *rpcsvc.SynchronizationService) {
+	s.syncSvcMu.Lock()
+	s.syncSvc = syncSvc
+	s.syncSvcMu.Unlock()
 }
 
 // loaderServer provides RPC clients with the ability to load and close wallets,
 // as well as establishing a RPC connection to a btcd consensus server.
 type loaderServer struct {
-	loader    *wallet.Loader
-	activeNet *netparams.Params
-	rpcClient *chain.RPCClient
-	mu        sync.Mutex
+	loader       *wallet.Loader
+	activeNet    *netparams.Params
+	mu           sync.Mutex
+	server       *grpc.Server                   // Used to start wallet service.
+	walletServer *WalletServer                  // Needed to associate sync service.
+	syncSvc      *rpcsvc.SynchronizationService // This can be made an interface later for SPV syncing.
 }
 
 // StartVersionService creates an implementation of the VersionService and
@@ -131,11 +168,16 @@ func (*versionServer) Version(ctx context.Context, req *pb.VersionRequest) (*pb.
 	}, nil
 }
 
-// StartWalletService creates an implementation of the WalletService and
-// registers it with the gRPC server.
-func StartWalletService(server *grpc.Server, wallet *wallet.Wallet) {
-	service := &walletServer{wallet}
+// RegisterWalletService creates a implementation of the WalletService and
+// registers it with the gRPC server.  This may only be called once during
+// program lifetime.  The synchronization service is optional, but unless
+// SetSynchronizationService is used to associate the wallet service with a sync
+// service later, not all methods will be available and will error with
+// FailedPrecondition.
+func RegisterWalletService(server *grpc.Server, wallet *wallet.Wallet, syncSvc *rpcsvc.SynchronizationService) *WalletServer {
+	service := &walletServer{wallet: wallet, syncSvc: syncSvc}
 	pb.RegisterWalletServiceServer(server, service)
+	return (*WalletServer)(service)
 }
 
 func (s *walletServer) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
@@ -536,14 +578,19 @@ func (s *walletServer) SignTransaction(ctx context.Context, req *pb.SignTransact
 func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTransactionRequest) (
 	*pb.PublishTransactionResponse, error) {
 
+	syncSvc, err := s.requireSynchronizationService()
+	if err != nil {
+		return nil, err
+	}
+
 	var msgTx wire.MsgTx
-	err := msgTx.Deserialize(bytes.NewReader(req.SignedTransaction))
+	err = msgTx.Deserialize(bytes.NewReader(req.SignedTransaction))
 	if err != nil {
 		return nil, grpc.Errorf(codes.InvalidArgument,
 			"Bytes do not represent a valid raw transaction: %v", err)
 	}
 
-	err = s.wallet.PublishTransaction(&msgTx)
+	err = syncSvc.PublishTransaction(&msgTx)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -733,12 +780,13 @@ func (s *walletServer) AccountNotifications(req *pb.AccountNotificationsRequest,
 	}
 }
 
-// StartWalletLoaderService creates an implementation of the WalletLoaderService
-// and registers it with the gRPC server.
-func StartWalletLoaderService(server *grpc.Server, loader *wallet.Loader,
+// RegisterWalletLoaderService creates an implementation of the
+// WalletLoaderService and registers it with the gRPC server.  This may only be
+// called once during program lifetime.
+func RegisterWalletLoaderService(server *grpc.Server, loader *wallet.Loader,
 	activeNet *netparams.Params) {
 
-	service := &loaderServer{loader: loader, activeNet: activeNet}
+	service := &loaderServer{loader: loader, activeNet: activeNet, server: server}
 	pb.RegisterWalletLoaderServiceServer(server, service)
 }
 
@@ -762,10 +810,23 @@ func (s *loaderServer) CreateWallet(ctx context.Context, req *pb.CreateWalletReq
 	}
 
 	s.mu.Lock()
-	if s.rpcClient != nil {
-		wallet.SynchronizeRPC(s.rpcClient)
-	}
+	syncSvc := s.syncSvc
+	// nil sync service is ok
+	s.walletServer = RegisterWalletService(s.server, wallet, syncSvc)
 	s.mu.Unlock()
+	if syncSvc != nil {
+		// TODO: Not running this in a new goroutine would block the RPC
+		// on a full rescan completing, which is less than desirable.
+		// Once that is fixed in the wallet/waddrmgr/wtxmgr packages,
+		// this should be made blocking so any initial sync errors can
+		// be returned.
+		go func() {
+			err := syncSvc.SynchronizeWallet(wallet)
+			if err != nil {
+				log.Errorf("Wallet synchronization failed:", err)
+			}
+		}()
+	}
 
 	return &pb.CreateWalletResponse{}, nil
 }
@@ -785,10 +846,19 @@ func (s *loaderServer) OpenWallet(ctx context.Context, req *pb.OpenWalletRequest
 	}
 
 	s.mu.Lock()
-	if s.rpcClient != nil {
-		wallet.SynchronizeRPC(s.rpcClient)
-	}
+	syncSvc := s.syncSvc
+	// nil sync service is ok
+	s.walletServer = RegisterWalletService(s.server, wallet, syncSvc)
 	s.mu.Unlock()
+	if syncSvc != nil {
+		// TODO: See similar comment for CreateWallet.
+		go func() {
+			err := syncSvc.SynchronizeWallet(wallet)
+			if err != nil {
+				log.Errorf("Wallet synchronization failed:", err)
+			}
+		}()
+	}
 
 	return &pb.OpenWalletResponse{}, nil
 }
@@ -805,6 +875,15 @@ func (s *loaderServer) WalletExists(ctx context.Context, req *pb.WalletExistsReq
 
 func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletRequest) (
 	*pb.CloseWalletResponse, error) {
+
+	defer s.mu.Unlock()
+	s.mu.Lock()
+
+	syncSvc := s.syncSvc
+	if syncSvc != nil {
+		wait := syncSvc.StopSynchronization()
+		wait()
+	}
 
 	err := s.loader.UnloadWallet()
 	if err == wallet.ErrNotLoaded {
@@ -825,8 +904,9 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 	defer s.mu.Unlock()
 	s.mu.Lock()
 
-	if s.rpcClient != nil {
-		return nil, grpc.Errorf(codes.FailedPrecondition, "RPC client already created")
+	if s.syncSvc != nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Synchronization service already created")
 	}
 
 	networkAddress, err := cfgutil.NormalizeAddress(req.NetworkAddress,
@@ -836,20 +916,12 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 			"Network address is ill-formed: %v", err)
 	}
 
-	// Error if the wallet is already syncing with the network.
-	wallet, walletLoaded := s.loader.LoadedWallet()
-	if walletLoaded && wallet.SynchronizingToNetwork() {
-		return nil, grpc.Errorf(codes.FailedPrecondition,
-			"wallet is loaded and already synchronizing")
-	}
-
-	rpcClient, err := chain.NewRPCClient(s.activeNet.Params, networkAddress, req.Username,
-		string(req.Password), req.Certificate, len(req.Certificate) == 0, 1)
-	if err != nil {
-		return nil, translateError(err)
-	}
-
-	err = rpcClient.Start()
+	syncSvc, err := rpcsvc.NewSynchronizationService(&rpcsvc.RPCOptions{
+		NetworkAddress: networkAddress,
+		Username:       req.Username,
+		Password:       string(req.Password),
+		Certs:          req.Certificate,
+	})
 	if err != nil {
 		if err == btcrpcclient.ErrInvalidAuth {
 			return nil, grpc.Errorf(codes.InvalidArgument,
@@ -860,10 +932,22 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 		}
 	}
 
-	s.rpcClient = rpcClient
+	s.syncSvc = syncSvc
 
+	wallet, walletLoaded := s.loader.LoadedWallet()
 	if walletLoaded {
-		wallet.SynchronizeRPC(rpcClient)
+		// TODO: See similar comment for CreateWallet.
+		go func() {
+			err := syncSvc.SynchronizeWallet(wallet)
+			if err != nil {
+				log.Errorf("Wallet synchronization failed:", err)
+			}
+		}()
+	}
+	if s.walletServer == nil {
+		s.walletServer = RegisterWalletService(s.server, wallet, syncSvc)
+	} else {
+		s.walletServer.SetSynchronizationService(syncSvc)
 	}
 
 	return &pb.StartConsensusRpcResponse{}, nil

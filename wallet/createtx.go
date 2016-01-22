@@ -103,18 +103,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	}
 	defer heldUnlock.Release()
 
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	syncBlock := w.Manager.SyncedTo()
 
-	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
-	if err != nil {
-		return nil, err
-	}
-
-	eligible, err := w.findEligibleOutputs(account, minconf, bs)
+	eligible, err := w.findEligibleOutputs(account, minconf, &syncBlock)
 	if err != nil {
 		return nil, err
 	}

@@ -447,17 +447,12 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	localhostListeners := map[string]struct{}{
-		"localhost": struct{}{},
-		"127.0.0.1": struct{}{},
-		"::1":       struct{}{},
-	}
-	RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
+	tlsRequired, err := cfgutil.TLSRequired(cfg.RPCConnect)
 	if err != nil {
 		return nil, nil, err
 	}
 	if cfg.DisableClientTLS {
-		if _, ok := localhostListeners[RPCHost]; !ok {
+		if tlsRequired {
 			str := "%s: the --noclienttls option may not be used " +
 				"when connecting RPC to non localhost " +
 				"addresses: %s"
@@ -478,17 +473,19 @@ func loadConfig() (*config, []string, error) {
 				fmt.Fprintln(os.Stderr, err)
 				return nil, nil, err
 			}
-			if !certExists {
-				if _, ok := localhostListeners[RPCHost]; ok {
-					btcdCertExists, err := cfgutil.FileExists(
-						btcdHomedirCAFile)
-					if err != nil {
-						fmt.Fprintln(os.Stderr, err)
-						return nil, nil, err
-					}
-					if btcdCertExists {
-						cfg.CAFile = btcdHomedirCAFile
-					}
+			// TLS is not required when the host is local.  Use this
+			// to decide whether the certificate from the btcd
+			// datadir can be used if the certificate was not
+			// already found.
+			if !certExists && !tlsRequired {
+				btcdCertExists, err := cfgutil.FileExists(
+					btcdHomedirCAFile)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					return nil, nil, err
+				}
+				if btcdCertExists {
+					cfg.CAFile = btcdHomedirCAFile
 				}
 			}
 		}
