@@ -330,14 +330,14 @@ func (s *SynchronizationService) syncWithNetwork(w *wallet.Wallet) error {
 	return s.initialRescan(addrs, unspent, w.Manager.SyncedTo())
 }
 
-// SendUnminedTxs iterates through all transactions that spend from wallet
+// sendUnminedTxs iterates through all transactions that spend from wallet
 // credits that are not known to have been mined into a block, and attempts to
 // send each to the chain server for relay.
 //
 // TODO: This should return an error if any of these lookups or sends fail, but
 // since send errors due to double spends need to be handled gracefully and this
 // isn't done yet, all sending errors are simply logged.
-func (s *SynchronizationService) SendUnminedTxs(w *wallet.Wallet) error {
+func (s *SynchronizationService) sendUnminedTxs(w *wallet.Wallet) error {
 	txs, err := w.TxStore.UnminedTxs()
 	if err != nil {
 		return err

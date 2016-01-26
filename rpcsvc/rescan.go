@@ -147,7 +147,7 @@ out:
 					noun, n.block.Hash, n.block.Height)
 
 				go func() {
-					err := s.SendUnminedTxs(w)
+					err := s.sendUnminedTxs(w)
 					if err != nil {
 						log.Infof("Failed to send "+
 							"unmined transactions:", err)
