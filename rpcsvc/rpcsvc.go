@@ -369,5 +369,6 @@ func (s *SynchronizationService) SearchForUnspentOutputs() error {
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propigated to other nodes and eventually mined.
 func (s *SynchronizationService) PublishTransaction(tx *wire.MsgTx) error {
-	return errUnimplemented
+	_, err := s.rpcClient.SendRawTransaction(tx, false)
+	return err
 }

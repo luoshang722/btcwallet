@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -92,7 +93,7 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	}
 
 	dbPath := filepath.Join(l.dbDirPath, walletDbName)
-	exists, err := fileExists(dbPath)
+	exists, err := cfgutil.FileExists(dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +204,6 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	if err != nil {
 		return nil, err
 	}
-	w.Start()
 
 	l.onLoaded(w, db)
 	return w, nil
@@ -213,7 +213,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 // This may return an error for unexpected I/O failures.
 func (l *Loader) WalletExists() (bool, error) {
 	dbPath := filepath.Join(l.dbDirPath, walletDbName)
-	return fileExists(dbPath)
+	return cfgutil.FileExists(dbPath)
 }
 
 // LoadedWallet returns the loaded wallet, if any, and a bool for whether the
@@ -224,15 +224,4 @@ func (l *Loader) LoadedWallet() (*Wallet, bool) {
 	w := l.wallet
 	l.mu.Unlock()
 	return w, w != nil
-}
-
-func fileExists(filePath string) (bool, error) {
-	_, err := os.Stat(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }

@@ -565,7 +565,7 @@ func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTr
 			"Bytes do not represent a valid raw transaction: %v", err)
 	}
 
-	_, err = syncSvc.SendRawTransaction(&msgTx, false)
+	err = syncSvc.PublishTransaction(&msgTx)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -856,8 +856,7 @@ func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletReque
 		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet is not loaded")
 	}
 
-	loadedWallet.Stop()
-	loadedWallet.WaitForShutdown()
+	loadedWallet.Close()
 
 	return &pb.CloseWalletResponse{}, nil
 }

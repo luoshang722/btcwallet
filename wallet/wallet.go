@@ -90,21 +90,10 @@ type Wallet struct {
 	NtfnServer *NotificationServer
 
 	chainParams *chaincfg.Params
-	wg          sync.WaitGroup
 
-	quit chan struct{}
-}
-
-// Start starts the goroutines necessary to manage a wallet.
-func (w *Wallet) Start() {
-	select {
-	case <-w.quit:
-		return
-	default:
-		w.wg.Add(2)
-		go w.txCreator()
-		go w.walletLocker()
-	}
+	wg     sync.WaitGroup
+	quit   chan struct{}
+	quitMu sync.Mutex
 }
 
 // ActiveData returns the currently-active receiving addresses and all unspent
@@ -1244,5 +1233,27 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, w
 	w.TxStore.NotifyUnspent = func(hash *wire.ShaHash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
+
+	w.wg.Add(2)
+	go w.txCreator()
+	go w.walletLocker()
+
 	return w, nil
+}
+
+// Close closes the wallet by shutting down any goroutines started.  The
+// function blocks until shutdown is completed.
+//
+// In the future, the wallet database will be closed by this as well, so callers
+// will not need to explicitly close both the wallet and database separately as
+// it is unsafe to close the database while transactions are still open.
+func (w *Wallet) Close() {
+	w.quitMu.Lock()
+	select {
+	case <-w.quit:
+	default:
+		close(w.quit)
+	}
+	w.quitMu.Unlock()
+	w.wg.Wait()
 }
