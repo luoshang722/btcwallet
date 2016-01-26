@@ -890,13 +890,6 @@ func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcReq
 			"Network address is ill-formed: %v", err)
 	}
 
-	// Error if the wallet is already syncing with the network.
-	wallet, walletLoaded := s.loader.LoadedWallet()
-	if walletLoaded && wallet.SynchronizingToNetwork() {
-		return nil, grpc.Errorf(codes.FailedPrecondition,
-			"Wallet is loaded and already synchronizing")
-	}
-
 	syncSvc, err := rpcsvc.NewSynchronizationService(&rpcsvc.RPCOptions{
 		NetworkAddress: networkAddress,
 		Username:       req.Username,
@@ -915,6 +908,7 @@ func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcReq
 
 	s.syncSvc = syncSvc
 
+	wallet, walletLoaded := s.loader.LoadedWallet()
 	if walletLoaded {
 		// TODO: See similar comment for CreateWallet.
 		go func() {
