@@ -88,8 +88,8 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		txmgrLog = logger
 		wtxmgr.UseLogger(logger)
 	case "CHNS":
-		chainLog = logger
-		chain.UseLogger(logger)
+		rpcsvcLog = logger
+		rpcsvc.UseLogger(logger)
 		btcrpcclient.UseLogger(logger)
 	case "GRPC":
 		grpcLog = logger

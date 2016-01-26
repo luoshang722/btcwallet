@@ -357,14 +357,6 @@ func (s *SynchronizationService) SendUnminedTxs(w *wallet.Wallet) error {
 	return nil
 }
 
-func (s *SynchronizationService) WatchAddresses(addrs []btcutil.Address) error {
-	return s.rpcClient.NotifyReceived(addrs)
-}
-
-func (s *SynchronizationService) SearchForUnspentOutputs() error {
-	return errUnimplemented
-}
-
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propigated to other nodes and eventually mined.
 func (s *SynchronizationService) PublishTransaction(tx *wire.MsgTx) error {
