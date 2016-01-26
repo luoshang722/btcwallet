@@ -851,6 +851,15 @@ func (s *loaderServer) WalletExists(ctx context.Context, req *pb.WalletExistsReq
 func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletRequest) (
 	*pb.CloseWalletResponse, error) {
 
+	defer s.mu.Unlock()
+	s.mu.Lock()
+
+	syncSvc := s.syncSvc
+	if syncSvc != nil {
+		wait := syncSvc.StopSynchronization()
+		wait()
+	}
+
 	loadedWallet, ok := s.loader.LoadedWallet()
 	if !ok {
 		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet is not loaded")

@@ -45,15 +45,14 @@ var errUnimplemented = errors.New("unimplemented")
 // In the future, this type is expected to share an interface with a similar
 // service that uses SPV for synchronization.
 type SynchronizationService struct {
-	rpcClient *btcrpcclient.Client
+	rpcClient  *btcrpcclient.Client
+	connConfig *btcrpcclient.ConnConfig
 
-	connConfig          *btcrpcclient.ConnConfig
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
-
-	rescanAddJob   chan *rescanJob
-	rescanProgress chan *rescanProgress
-	rescanResults  chan wallet.RescanResult
+	rescanAddJob        chan *rescanJob
+	rescanProgress      chan *rescanProgress
+	rescanResults       chan wallet.RescanResult
 
 	wg     sync.WaitGroup
 	quit   chan struct{}
