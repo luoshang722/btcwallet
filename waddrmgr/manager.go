@@ -2038,6 +2038,14 @@ func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 	return decrypted, nil
 }
 
+func (m *Manager) AccountExtendedPubKey(account uint32) (*hdkeychain.ExtendedKey, error) {
+	ai, err := m.loadAccountInfo(account)
+	if err != nil {
+		return nil, err
+	}
+	return ai.acctKeyPub, nil
+}
+
 // newManager returns a new locked address manager with the given parameters.
 func newManager(namespace walletdb.Namespace, chainParams *chaincfg.Params,
 	masterKeyPub *snacl.SecretKey, masterKeyPriv *snacl.SecretKey,
