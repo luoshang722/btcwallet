@@ -183,9 +183,9 @@ const (
 	// faulty.
 	ErrBadPoolUserAddr
 
-	// ErrStoreClosed indicates that a function was called after the stake
-	// store was closed.
-	ErrStoreClosed
+	// ErrUnimplemented describes any application error due to an unimplemented
+	// or missing feature.
+	ErrUnimplemented
 )
 
 // E describes an application-level error.  An error code is provided to
