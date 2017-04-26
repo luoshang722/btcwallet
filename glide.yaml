@@ -9,6 +9,8 @@ import:
 - package: github.com/decred/bitset
   version: master
 - package: github.com/decred/dcrd
+  repo: https://github.com/davecgh/btcd
+  version: add_ln_agenda
   subpackages:
   - blockchain
   - blockchain/stake
