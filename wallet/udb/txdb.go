@@ -139,6 +139,7 @@ var (
 	bucketUnminedCredits          = []byte("mc")
 	bucketUnminedInputs           = []byte("mi")
 	bucketTickets                 = []byte("tix")
+	bucketTicketSpenders          = []byte("stix")
 	bucketScripts                 = []byte("sc")
 	bucketMultisig                = []byte("ms")
 	bucketMultisigUsp             = []byte("mu")
@@ -1619,8 +1620,8 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 	return nil
 }
 
-// Ticket purchases are recorded in the tickets bucket.  The bucket key is the
-// ticket purchase transaction hash.  The value is serialized as such:
+// Ticket purchase metadata is recorded in the tickets bucket.  The bucket key
+// is the ticket purchase transaction hash.  The value is serialized as such:
 //
 //   [0:32]		Spender hash (zeros if none)
 //   [32:33]	Ticket state
@@ -1636,7 +1637,7 @@ const (
 )
 
 type ticketRecord struct {
-	spenderHash [32]byte
+	spenderHash chainhash.Hash
 	state       ticketState
 	price       dcrutil.Amount
 	fee         dcrutil.Amount
@@ -1668,6 +1669,21 @@ func putTicketRecord(ns walletdb.ReadWriteBucket, ticketHash *chainhash.Hash, r 
 
 func existsRawTicketRecord(ns walletdb.ReadBucket, k []byte) (v []byte) {
 	return ns.NestedReadBucket(bucketTickets).Get(k)
+}
+
+// Vote and revocation metadata is recorded in the spent tickets bucket.  The
+// key is the transaction hash of the vote or revocation.
+
+type ticketSpenderKind int
+
+const (
+	ticketSpenderKindVote ticketSpenderKind = iota
+	ticketSpenderKindRevocation
+)
+
+type ticketSpenderRecord struct {
+	ticketHash chainhash.Hash
+	kind       ticketSpenderKind
 }
 
 // Tx scripts are stored as the raw serialized script. The key in the database
