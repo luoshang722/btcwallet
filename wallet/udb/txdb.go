@@ -138,6 +138,7 @@ var (
 	bucketUnmined                 = []byte("m")
 	bucketUnminedCredits          = []byte("mc")
 	bucketUnminedInputs           = []byte("mi")
+	bucketTickets                 = []byte("tix")
 	bucketScripts                 = []byte("sc")
 	bucketMultisig                = []byte("ms")
 	bucketMultisigUsp             = []byte("mu")
@@ -1616,6 +1617,45 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 		return storeError(apperrors.ErrDatabase, str, err)
 	}
 	return nil
+}
+
+// Ticket purchases are recorded in the tickets bucket.  The bucket key is the
+// ticket purchase transaction hash.  The value is serialized as such:
+//
+//   [0:4]		Block height
+//   [4:12]		Ticket price
+//   [12:20] 	Ticket fee
+//   [20:21]	Ticket state (immature|live, revokable, voted, or revoked)
+//   [21:]		Array of votes and revocations:
+// 	   [0:32]	Vote or revocation hash
+//     [32:33]	Vote or revocation
+
+type ticketState int
+
+const (
+	ticketStateUnspent ticketState = iota
+	ticketStateVoted
+	ticketStateRevoked
+)
+
+type ticketRecord struct {
+	blockHeight int32
+	price       dcrutil.Amount
+	fee         dcrutil.Amount
+	status      ticketState
+}
+
+func putRawTicketRecord(ns walletdb.ReadWriteBucket, k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketTickets).Put(k, v)
+	if err != nil {
+		const str = "failed to put ticket record"
+		return apperrors.Wrap(err, apperrors.ErrDatabase, str)
+	}
+	return nil
+}
+
+func existsRawTicketRecord(ns walletdb.ReadBucket, k []byte) (v []byte) {
+	return ns.NestedReadBucket(bucketTickets).Get(k)
 }
 
 // Tx scripts are stored as the raw serialized script. The key in the database
