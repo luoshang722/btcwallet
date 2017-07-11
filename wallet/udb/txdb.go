@@ -1690,6 +1690,28 @@ type ticketSpenderRecord struct {
 	kind       ticketSpenderKind
 }
 
+func valueTicketSpenderRecord(r *ticketSpenderRecord) []byte {
+	v := make([]byte, 33)
+	copy(v[:32], r.ticketHash[:])
+	v[33] = byte(r.kind)
+	return v
+}
+
+func putRawTicketSpenderRecord(ns walletdb.ReadWriteBucket, k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketTicketSpenders).Put(k, v)
+	if err != nil {
+		const str = "failed to put ticket spender record"
+		return apperrors.Wrap(err, apperrors.ErrDatabase, str)
+	}
+	return nil
+}
+
+func putTicketSpenderRecord(ns walletdb.ReadWriteBucket, ticketSpender *chainhash.Hash, r *ticketSpenderRecord) error {
+	k := ticketSpender[:]
+	v := valueTicketSpenderRecord(r)
+	return putRawTicketSpenderRecord(ns, k, v)
+}
+
 // Tx scripts are stored as the raw serialized script. The key in the database
 // for the TxScript itself is the hash160 of the script.
 func keyTxScript(script []byte) []byte {
