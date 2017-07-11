@@ -1622,13 +1622,10 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 // Ticket purchases are recorded in the tickets bucket.  The bucket key is the
 // ticket purchase transaction hash.  The value is serialized as such:
 //
-//   [0:4]		Block height
-//   [4:12]		Ticket price
-//   [12:20] 	Ticket fee
-//   [20:21]	Ticket state (immature|live, revokable, voted, or revoked)
-//   [21:]		Array of votes and revocations:
-// 	   [0:32]	Vote or revocation hash
-//     [32:33]	Vote or revocation
+//   [0:32]		Spender hash (zeros if none)
+//   [32:33]	Ticket state
+//   [33:41]	Ticket price
+//   [41:49]	Ticket fee
 
 type ticketState int
 
@@ -1639,10 +1636,19 @@ const (
 )
 
 type ticketRecord struct {
-	blockHeight int32
+	spenderHash [32]byte
+	state       ticketState
 	price       dcrutil.Amount
 	fee         dcrutil.Amount
-	status      ticketState
+}
+
+func valueTicketRecord(r *ticketRecord) []byte {
+	v := make([]byte, 49)
+	copy(v, r.spenderHash[:])
+	v[32] = byte(r.state)
+	byteOrder.PutUint64(v[33:41], uint64(r.price))
+	byteOrder.PutUint64(v[41:49], uint64(r.fee))
+	return v
 }
 
 func putRawTicketRecord(ns walletdb.ReadWriteBucket, k, v []byte) error {
@@ -1652,6 +1658,12 @@ func putRawTicketRecord(ns walletdb.ReadWriteBucket, k, v []byte) error {
 		return apperrors.Wrap(err, apperrors.ErrDatabase, str)
 	}
 	return nil
+}
+
+func putTicketRecord(ns walletdb.ReadWriteBucket, ticketHash *chainhash.Hash, r *ticketRecord) error {
+	k := ticketHash[:]
+	v := valueTicketRecord(r)
+	return putRawTicketRecord(ns, k, v)
 }
 
 func existsRawTicketRecord(ns walletdb.ReadBucket, k []byte) (v []byte) {
