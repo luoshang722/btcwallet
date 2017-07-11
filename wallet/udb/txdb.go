@@ -1631,7 +1631,7 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 type ticketState int
 
 const (
-	ticketStateUnspent ticketState = iota
+	ticketStateUnspent ticketState = iota + 1
 	ticketStateVoted
 	ticketStateRevoked
 )
@@ -1672,12 +1672,16 @@ func existsRawTicketRecord(ns walletdb.ReadBucket, k []byte) (v []byte) {
 }
 
 // Vote and revocation metadata is recorded in the spent tickets bucket.  The
-// key is the transaction hash of the vote or revocation.
+// key is the transaction hash of the vote or revocation.  The value is
+// serialized as such:
+//
+//   [0:32]		Ticket purchase transaction hash
+//   [32:33]	Ticket spender kind (vote or revocation)
 
 type ticketSpenderKind int
 
 const (
-	ticketSpenderKindVote ticketSpenderKind = iota
+	ticketSpenderKindVote ticketSpenderKind = iota + 1
 	ticketSpenderKindRevocation
 )
 
