@@ -662,12 +662,11 @@ func deleteTxRecord(ns walletdb.ReadWriteBucket, txHash *chainhash.Hash, block *
 // latestTxRecord searches for the newest recorded mined transaction record with
 // a matching hash.  In case of a hash collision, the record from the newest
 // block is returned.  Returns (nil, nil) if no matching transactions are found.
-func latestTxRecord(ns walletdb.ReadBucket, txHash *chainhash.Hash) (k, v []byte) {
-	prefix := txHash[:]
+func latestTxRecord(ns walletdb.ReadBucket, txHash []byte) (k, v []byte) {
 	c := ns.NestedReadBucket(bucketTxRecords).ReadCursor()
-	ck, cv := c.Seek(prefix)
+	ck, cv := c.Seek(txHash)
 	var lastKey, lastVal []byte
-	for bytes.HasPrefix(ck, prefix) {
+	for bytes.HasPrefix(ck, txHash) {
 		lastKey, lastVal = ck, cv
 		ck, cv = c.Next()
 	}
@@ -1669,6 +1668,14 @@ func putTicketRecord(ns walletdb.ReadWriteBucket, ticketHash *chainhash.Hash, r 
 
 func existsRawTicketRecord(ns walletdb.ReadBucket, k []byte) (v []byte) {
 	return ns.NestedReadBucket(bucketTickets).Get(k)
+}
+
+func extractRawTicketRecordSpenderHash(v []byte) []byte {
+	return v[:32]
+}
+
+func extractRawTicketRecordState(v []byte) ticketState {
+	return ticketState(v[33])
 }
 
 // Vote and revocation metadata is recorded in the spent tickets bucket.  The

@@ -2464,90 +2464,45 @@ func (s *Store) UnspentOutpoints(ns walletdb.ReadBucket) ([]wire.OutPoint, error
 	return append(unspent, unspentZC...), nil
 }
 
-// UnspentTickets returns all unspent tickets that are known for this wallet.
-// The order is undefined.
-func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32,
-	includeImmature bool) ([]chainhash.Hash, error) {
-
-	return s.unspentTickets(ns, syncHeight, includeImmature)
+// isZeroBytes returns whether the bytes in the slice v are all zero.
+func isZeroBytes(v []byte) bool {
+	for _, b := range v {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
-func (s *Store) unspentTickets(ns walletdb.ReadBucket, syncHeight int32,
-	includeImmature bool) ([]chainhash.Hash, error) {
-
+// UnspentTickets returns all unspent tickets that are known for this wallet.
+// The order is undefined.
+func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32, includeImmature bool) ([]chainhash.Hash, error) {
 	var tickets []chainhash.Hash
-	numTickets := 0
-
-	var op wire.OutPoint
-	var block Block
-	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
-		err := readCanonicalOutPoint(k, &op)
-		if err != nil {
-			return err
+	c := ns.NestedReadBucket(bucketTickets).ReadCursor()
+	var hash chainhash.Hash
+	for txHash, ticketRecVal := c.First(); txHash != nil; txHash, ticketRecVal = c.Next() {
+		ticketState := extractRawTicketRecordState(ticketRecVal)
+		spenderHash := extractRawTicketRecordSpenderHash(ticketRecVal)
+		if ticketState != ticketStateUnspent || !isZeroBytes(spenderHash) {
+			continue
 		}
-		if existsRawUnminedInput(ns, k) != nil {
-			// Output is spent by an unmined transaction.
-			// Skip this k/v pair.
-			return nil
-		}
-		err = readUnspentBlock(v, &block)
-		if err != nil {
-			return err
-		}
-
-		kC := keyCredit(&op.Hash, op.Index, &block)
-		vC := existsRawCredit(ns, kC)
-		opCode := fetchRawCreditTagOpCode(vC)
-		if opCode == txscript.OP_SSTX {
-			if !includeImmature &&
-				!confirmed(int32(s.chainParams.TicketMaturity)+1,
-					block.Height, syncHeight) {
-				return nil
+		if !includeImmature {
+			txRecKey, _ := latestTxRecord(ns, txHash)
+			if txRecKey == nil {
+				continue
 			}
-			tickets = append(tickets, op.Hash)
-			numTickets++
-		}
-
-		return nil
-	})
-	if err != nil {
-		if _, ok := err.(apperrors.E); ok {
-			return nil, err
-		}
-		str := "failed iterating unspent bucket"
-		return nil, storeError(apperrors.ErrDatabase, str, err)
-	}
-
-	if includeImmature {
-		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
-			if existsRawUnminedInput(ns, k) != nil {
-				// Output is spent by an unmined transaction.
-				// Skip to next unmined credit.
-				return nil
-			}
-			opCode := fetchRawUnminedCreditTagOpcode(v)
-			if opCode == txscript.OP_SSTX {
-				err := readCanonicalOutPoint(k, &op)
-				if err != nil {
-					return err
-				}
-				tickets = append(tickets, op.Hash)
-				numTickets++
-			}
-
-			return nil
-		})
-		if err != nil {
-			if _, ok := err.(apperrors.E); ok {
+			var height int32
+			err := readRawTxRecordBlockHeight(txRecKey, &height)
+			if err != nil {
 				return nil, err
 			}
-			str := "failed iterating unmined credits bucket"
-			return nil, storeError(apperrors.ErrDatabase, str, err)
+			if !confirmed(int32(s.chainParams.TicketMaturity)+1, height, syncHeight) {
+				continue
+			}
 		}
+		copy(hash[:], txHash)
+		tickets = append(tickets, hash)
 	}
-
-	log.Tracef("%v many tickets found", numTickets)
-
 	return tickets, nil
 }
 
