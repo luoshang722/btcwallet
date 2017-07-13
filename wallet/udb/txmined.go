@@ -2508,8 +2508,8 @@ func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32, include
 
 // OwnTicket returns whether ticketHash is the hash of a ticket purchase
 // transaction managed by the wallet.
-func (s *Store) OwnTicket(db walletdb.ReadTx, ticketHash *chainhash.Hash) bool {
-	ns := db.ReadBucket(wtxmgrBucketKey)
+func (s *Store) OwnTicket(dbtx walletdb.ReadTx, ticketHash *chainhash.Hash) bool {
+	ns := dbtx.ReadBucket(wtxmgrBucketKey)
 	v := existsRawTicketRecord(ns, ticketHash[:])
 	return v != nil
 }

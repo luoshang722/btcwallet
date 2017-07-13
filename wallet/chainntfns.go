@@ -860,6 +860,18 @@ func (w *Wallet) handleChainVotingNotifications(chainClient *chain.RPCClient) {
 	w.wg.Done()
 }
 
+// selectOwnedTickets returns a slice of tickets hashes from the tickets
+// argument that are owned by the wallet.
+func selectOwnedTickets(w *Wallet, dbtx walletdb.ReadTx, tickets []*chainhash.Hash) []*chainhash.Hash {
+	var owned []*chainhash.Hash
+	for _, ticketHash := range tickets {
+		if w.TxStore.OwnTicket(dbtx, ticketHash) {
+			owned = append(owned, ticketHash)
+		}
+	}
+	return owned
+}
+
 // handleWinningTickets receives a list of hashes and some block information
 // and submits it to the wstakemgr to handle SSGen production.
 func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
@@ -880,15 +892,18 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 	// be fixed somehow, but this should be stable for networks that
 	// are voting at normal block speeds.
 
-	// Only consider tickets owned by this wallet.
-	ticketHashes := w.StakeMgr.OwnTickets(winningTicketHashes)
-	if len(ticketHashes) == 0 {
-		return nil
-	}
-
-	votes := make([]*wire.MsgTx, len(ticketHashes))
+	var ticketHashes []*chainhash.Hash
+	var votes []*wire.MsgTx
 	voteBits := w.VoteBits()
 	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		// Only consider tickets owned by this wallet.
+		ticketHashes = selectOwnedTickets(w, dbtx, winningTicketHashes)
+		if len(ticketHashes) == 0 {
+			return nil
+		}
+
+		votes = make([]*wire.MsgTx, len(ticketHashes))
+
 		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 		for i, ticketHash := range ticketHashes {
 			ticketPurchase, err := w.StakeMgr.TicketPurchase(dbtx, ticketHash)
@@ -959,15 +974,18 @@ func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash, blockHeight int3
 		return err
 	}
 
-	// Only consider tickets owned by this wallet.
-	ticketHashes := w.StakeMgr.OwnTickets(missedTicketHashes)
-	if len(ticketHashes) == 0 {
-		return nil
-	}
-
-	revocations := make([]*wire.MsgTx, len(ticketHashes))
+	var ticketHashes []*chainhash.Hash
+	var revocations []*wire.MsgTx
 	relayFee := w.RelayFee()
 	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		// Only consider tickets owned by this wallet.
+		ticketHashes = selectOwnedTickets(w, dbtx, missedTicketHashes)
+		if len(ticketHashes) == 0 {
+			return nil
+		}
+
+		revocations = make([]*wire.MsgTx, len(ticketHashes))
+
 		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 		for i, ticketHash := range ticketHashes {
 			ticketPurchase, err := w.StakeMgr.TicketPurchase(dbtx, ticketHash)
