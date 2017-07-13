@@ -514,7 +514,7 @@ func (w *Wallet) processTransactionRecord(dbtx walletdb.ReadWriteTx, rec *udb.Tx
 	if is, _ := stake.IsSSGen(&rec.MsgTx); is {
 		if serializedHeader != nil {
 			txInHash := &rec.MsgTx.TxIn[1].PreviousOutPoint.Hash
-			if w.StakeMgr.CheckHashInStore(txInHash) {
+			if w.TxStore.OwnTicket(dbtx, txInHash) {
 				err := w.StakeMgr.InsertSSGen(stakemgrNs, &blockMeta.Block.Hash,
 					int64(height), &rec.Hash, stake.SSGenVoteBits(&rec.MsgTx),
 					txInHash)
@@ -566,7 +566,7 @@ func (w *Wallet) processTransactionRecord(dbtx walletdb.ReadWriteTx, rec *udb.Tx
 	if is, _ := stake.IsSSRtx(&rec.MsgTx); is && serializedHeader != nil {
 		txInHash := &rec.MsgTx.TxIn[0].PreviousOutPoint.Hash
 
-		if w.StakeMgr.CheckHashInStore(txInHash) {
+		if w.TxStore.OwnTicket(dbtx, txInHash) {
 			err := w.StakeMgr.StoreRevocationInfo(dbtx, txInHash, &rec.Hash,
 				&blockMeta.Hash, height)
 			if err != nil {

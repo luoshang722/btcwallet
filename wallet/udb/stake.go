@@ -109,15 +109,6 @@ func (s *StakeStore) checkHashInStore(hash *chainhash.Hash) bool {
 	return exists
 }
 
-// CheckHashInStore is the exported version of CheckHashInStore that is
-// safe for concurrent access.
-func (s *StakeStore) CheckHashInStore(hash *chainhash.Hash) bool {
-	s.mtx.RLock()
-	exists := s.checkHashInStore(hash)
-	s.mtx.RUnlock()
-	return exists
-}
-
 // addHashToStore adds a hash into ownedSStxs.
 func (s *StakeStore) addHashToStore(hash *chainhash.Hash) {
 	s.ownedSStxs[*hash] = struct{}{}

@@ -2506,6 +2506,14 @@ func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32, include
 	return tickets, nil
 }
 
+// OwnTicket returns whether ticketHash is the hash of a ticket purchase
+// transaction managed by the wallet.
+func (s *Store) OwnTicket(db walletdb.ReadTx, ticketHash *chainhash.Hash) bool {
+	ns := db.ReadBucket(wtxmgrBucketKey)
+	v := existsRawTicketRecord(ns, ticketHash[:])
+	return v != nil
+}
+
 // MultisigCredit is a redeemable P2SH multisignature credit.
 type MultisigCredit struct {
 	OutPoint   *wire.OutPoint
