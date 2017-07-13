@@ -114,20 +114,6 @@ func (s *StakeStore) addHashToStore(hash *chainhash.Hash) {
 	s.ownedSStxs[*hash] = struct{}{}
 }
 
-// OwnTickets returns the hashes of tickets frrom the ticketHashes argument that
-// are owned by this wallet.
-func (s *StakeStore) OwnTickets(ticketHashes []*chainhash.Hash) []*chainhash.Hash {
-	var owned []*chainhash.Hash
-	s.mtx.RLock()
-	for _, hash := range ticketHashes {
-		if _, ok := s.ownedSStxs[*hash]; ok {
-			owned = append(owned, hash)
-		}
-	}
-	s.mtx.RUnlock()
-	return owned
-}
-
 // insertSStx inserts an SStx into the store.
 func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx) error {
 	// If we already have the SStx, no need to
