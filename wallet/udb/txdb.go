@@ -1626,6 +1626,7 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 //   [32:33]	Ticket state
 //   [33:41]	Ticket price
 //   [41:49]	Ticket fee
+//   []
 
 type ticketState int
 

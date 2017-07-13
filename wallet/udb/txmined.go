@@ -2474,19 +2474,88 @@ func isZeroBytes(v []byte) bool {
 	return true
 }
 
-// UnspentTickets returns all unspent tickets that are known for this wallet.
-// The order is undefined.
-func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32, includeImmature bool) ([]chainhash.Hash, error) {
+type TicketFlags int
+
+// Flags used to control how tickets are selected.  Flags can be combined as a
+// bitmask to produce interesting and flexible combinations, e.g.:
+//   Timmature|Tlive:			all unpicked tickets
+//   Tspent|Tmissed|Texpired:   all revoked tickets
+//   Tunspent|Tmissed|Texpired:	all revokable tickets
+//   Tspent|Tpicked:			all voted tickets
+const (
+	Tunspent TicketFlags = 1 << iota
+	Tspent
+	Timmature
+	Tlive
+	Tpicked
+	Tmissed
+	Texpired
+)
+
+// TicketHashes returns the hashes of all tickets that match the flags.  The
+// order is undefined.  Returns nil, nil when flags is zero.  Use
+// ^TicketFlags(0) to include recorded ticket hash.
+func (s *Store) TicketHashes(dbtx walletdb.ReadTx, flags TicketFlags) ([]chainhash.Hash, error) {
+	if flags == 0 {
+		return nil, nil
+	}
+
+	ns := dbtx.ReadBucket(wtxmgrBucketKey)
+	_, syncHeight := s.MainChainTip(ns)
+
+	// Normalize flags.  If none of the spent|unspent or
+	// immature|live|picked|missed|expired are set, set each of them so they
+	// aren't skipped.
+	if flags&(Tunspent|Tspent) == 0 {
+		flags |= Tunspent | Tspent
+	}
+	if flags&(Timmature|Tlive|Tpicked|Tmissed|Texpired) == 0 {
+		flags |= Timmature | Tlive | Tpicked | Tmissed | Texpired
+	}
+
 	var tickets []chainhash.Hash
 	c := ns.NestedReadBucket(bucketTickets).ReadCursor()
 	var hash chainhash.Hash
 	for txHash, ticketRecVal := c.First(); txHash != nil; txHash, ticketRecVal = c.Next() {
 		ticketState := extractRawTicketRecordState(ticketRecVal)
 		spenderHash := extractRawTicketRecordSpenderHash(ticketRecVal)
-		if ticketState != ticketStateUnspent || !isZeroBytes(spenderHash) {
+
+		spent := ticketState != ticketStateUnspent || !isZeroBytes(spenderHash)
+		if spent && flags&Tspent == 0 {
 			continue
 		}
-		if !includeImmature {
+		if !spent && flags&Tunspent == 0 {
+			continue
+		}
+
+		// Set ticketHeight to the block height the ticket is mined in, or -1 if
+		// the ticket purchase transaction is unmined.  If the transaction is
+		// not found at all, skip it.
+		var ticketHeight int32
+		txRecKey, _ := latestTxRecord(ns, txHash)
+		if txRecKey != nil {
+			err := readRawTxRecordBlockHeight(txRecKey, &ticketHeight)
+			if err != nil {
+				return nil, err
+			}
+		} else if existsRawUnmined(ns, txHash) != nil {
+			ticketHeight = -1
+		} else {
+			continue
+		}
+
+		if flags&Timmature != 0 {
+			if flags&Tlive != 0 {
+
+			} else {
+
+			}
+			if confirmed(int32(s.chainParams.TicketMaturity)+1, ticketHeight, syncHeight) {
+
+			}
+		}
+
+		if flags&Timmature == 0 {
 			txRecKey, _ := latestTxRecord(ns, txHash)
 			if txRecKey == nil {
 				continue
@@ -2496,10 +2565,34 @@ func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32, include
 			if err != nil {
 				return nil, err
 			}
-			if !confirmed(int32(s.chainParams.TicketMaturity)+1, height, syncHeight) {
+			if confirmed(int32(s.chainParams.TicketMaturity)+1, height, syncHeight) {
+				// Immature tickets may not more confirmations than the maturity
+				// period.  The +1 is correct, dcrd has an off by one here.
 				continue
 			}
 		}
+		if flags&Tlive == 0 {
+			if picked && pickedBeforeThisBlock {
+				// Exclude Live tickets cannot be selected from a previous block.
+			}
+			if expired {
+				// Live tickets cannot be expired
+			}
+		}
+		if flags&Tpicked == 0 {
+			if picked {
+				// Picked tickets
+			}
+		}
+		if flags&Tmissed == 0 {
+			// TODO
+		}
+		if flags&Texpired == 0 {
+			if expired {
+				continue
+			}
+		}
+
 		copy(hash[:], txHash)
 		tickets = append(tickets, hash)
 	}

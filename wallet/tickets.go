@@ -45,17 +45,15 @@ func (w *Wallet) GenerateVoteTx(blockHash *chainhash.Hash, height int32, ticketH
 //
 // BUG: This does not exclude unspent missed or expired tickets.
 func (w *Wallet) LiveTicketHashes(includeImmature bool) ([]chainhash.Hash, error) {
+	flags := udb.Tunspent | udb.Tlive
+	if includeImmature {
+		flags |= udb.Timmature
+	}
+
 	var ticketHashes []chainhash.Hash
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-		_, tipHeight := w.TxStore.MainChainTip(txmgrNs)
-
-		// UnspentTickets collects all the tickets that pay out to a
-		// public key hash for a public key owned by this wallet.
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
 		var err error
-		ticketHashes, err = w.TxStore.UnspentTickets(txmgrNs, tipHeight,
-			includeImmature)
+		ticketHashes, err = w.TxStore.TicketHashes(dbtx, flags)
 		return err
 	})
 	return ticketHashes, err
@@ -166,11 +164,11 @@ func (w *Wallet) RevokeTickets(chainClient *chain.RPCClient) error {
 	var ticketHashes []chainhash.Hash
 	var tipHash chainhash.Hash
 	var tipHeight int32
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		ns := dbtx.ReadBucket(wtxmgrNamespaceKey)
 		var err error
 		tipHash, tipHeight = w.TxStore.MainChainTip(ns)
-		ticketHashes, err = w.TxStore.UnspentTickets(ns, tipHeight, false)
+		ticketHashes, err = w.TxStore.TicketHashes(dbtx, udb.Tunspent)
 		return err
 	})
 	if err != nil {
