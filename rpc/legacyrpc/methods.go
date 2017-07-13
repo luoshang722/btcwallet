@@ -101,7 +101,7 @@ var rpcHandlers = map[string]struct {
 	"getreceivedbyaddress":    {handler: getReceivedByAddress},
 	"getstakeinfo":            {handlerWithChain: getStakeInfo},
 	"getticketfee":            {handler: getTicketFee},
-	"gettickets":              {handlerWithChain: getTickets},
+	"gettickets":              {handler: getTickets},
 	"gettransaction":          {handler: getTransaction},
 	"getvotechoices":          {handler: getVoteChoices},
 	"getwalletfee":            {handler: getWalletFee},
@@ -1213,10 +1213,10 @@ func getTicketFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 // getTickets handles a gettickets request by returning the hashes of the tickets
 // currently owned by wallet, encoded as strings.
-func getTickets(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func getTickets(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetTicketsCmd)
 
-	ticketHashes, err := w.LiveTicketHashes(chainClient, cmd.IncludeImmature)
+	ticketHashes, err := w.LiveTicketHashes(cmd.IncludeImmature)
 	if err != nil {
 		return nil, err
 	}
