@@ -15,11 +15,11 @@ import (
 	"strings"
 
 	flags "github.com/jessevdk/go-flags"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcwallet/internal/cfgutil"
-	"github.com/roasbeef/btcwallet/internal/legacy/keystore"
-	"github.com/roasbeef/btcwallet/netparams"
-	"github.com/roasbeef/btcwallet/wallet"
+	"github.com/ltcsuite/ltcutil"
+	"github.com/ltcsuite/ltcwallet/internal/cfgutil"
+	"github.com/ltcsuite/ltcwallet/internal/legacy/keystore"
+	"github.com/ltcsuite/ltcwallet/netparams"
+	"github.com/ltcsuite/ltcwallet/wallet"
 )
 
 const (
@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
-	defaultAppDataDir  = btcutil.AppDataDir("btcwallet", false)
+	btcdDefaultCAFile  = filepath.Join(ltcutil.AppDataDir("btcd", false), "rpc.cert")
+	defaultAppDataDir  = ltcutil.AppDataDir("btcwallet", false)
 	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
 	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
@@ -50,7 +50,7 @@ type config struct {
 	Create        bool                    `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	AppDataDir    *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
-	TestNet3      bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
+	TestNet4      bool                    `long:"testnet" description:"Use the test Litecoin network (version 4) (default mainnet)"`
 	SimNet        bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	NoInitialLoad bool                    `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
 	DebugLevel    string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
@@ -319,7 +319,7 @@ func loadConfig() (*config, []string, error) {
 	// succeeds.  This prevents the warning on help messages and invalid
 	// options.
 	if configFileError != nil {
-		log.Warnf("%v", configFileError)
+		fmt.Printf("%v\n", configFileError)
 	}
 
 	// Check deprecated aliases.  The new options receive priority when both
@@ -348,8 +348,8 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	if cfg.TestNet3 {
-		activeNet = &netparams.TestNet3Params
+	if cfg.TestNet4 {
+		activeNet = &netparams.TestNet4Params
 		numNets++
 	}
 	if cfg.SimNet {
@@ -376,9 +376,9 @@ func loadConfig() (*config, []string, error) {
 		os.Exit(0)
 	}
 
-	// Initialize logging at the default logging level.
-	initSeelogLogger(filepath.Join(cfg.LogDir, defaultLogFilename))
-	setLogLevels(defaultLogLevel)
+	// Initialize log rotation.  After log rotation has been initialized, the
+	// logger variables may be used.
+	initLogRotator(filepath.Join(cfg.LogDir, defaultLogFilename))
 
 	// Parse, validate, and set debug log level(s).
 	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {

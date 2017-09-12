@@ -13,9 +13,9 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/roasbeef/btcwallet/chain"
-	"github.com/roasbeef/btcwallet/rpc/legacyrpc"
-	"github.com/roasbeef/btcwallet/wallet"
+	"github.com/ltcsuite/ltcwallet/chain"
+	"github.com/ltcsuite/ltcwallet/rpc/legacyrpc"
+	"github.com/ltcsuite/ltcwallet/wallet"
 )
 
 var (
@@ -45,7 +45,7 @@ func walletMain() error {
 		return err
 	}
 	cfg = tcfg
-	defer backendLog.Flush()
+	defer os.Stdout.Sync()
 
 	// Show version at startup.
 	log.Infof("Version %s", version())

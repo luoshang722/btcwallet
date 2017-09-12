@@ -1,28 +1,10 @@
-hash: d945622a1e24954b5ffe2855e922e687132ccc13fb1a1bc5d57c15c72603948a
-updated: 2017-01-11T20:24:15.024651319-05:00
+hash: a6aaeea80d9e82dadb3023ecca8518ee6d6dbb1efaafaaa1670a8f7ee17a59f6
+updated: 2017-09-12T15:46:33.7279254-04:00
 imports:
 - name: github.com/boltdb/bolt
-  version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
-- name: github.com/btcsuite/btcd
-  version: 7c0fd83c87b2d2be405489cff522e0110328cd1e
-  subpackages:
-  - blockchain
-  - btcec
-  - btcjson
-  - chaincfg
-  - chaincfg/chainhash
-  - database
-  - txscript
-  - wire
+  version: fa5367d20c994db73282594be0146ab221657943
 - name: github.com/btcsuite/btclog
-  version: 73889fb79bd687870312b6e40effcecffbd57d30
-- name: github.com/btcsuite/btcrpcclient
-  version: 5ce0ed600997eafaed25ad4936c1d84ec6ad2b5a
-- name: github.com/btcsuite/btcutil
-  version: 86346b5a958c0cf94186b87855469ae991be501c
-  subpackages:
-  - base58
-  - hdkeychain
+  version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 - name: github.com/btcsuite/go-socks
   version: 4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f
   subpackages:
@@ -38,17 +20,46 @@ imports:
   - scrypt
   - ssh/terminal
 - name: github.com/btcsuite/seelog
-  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
+  version: 556d4dde7873880ceb8b758dce71f4906162322a
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/golang/protobuf
-  version: 8ee79997227bf9b34611aee7946ae64735e6fd93
+  version: 17ce1425424ab154092bbb43af630bd647f3bb0d
   subpackages:
   - proto
+  - ptypes
+  - ptypes/any
+  - ptypes/duration
+  - ptypes/timestamp
 - name: github.com/jessevdk/go-flags
-  version: 1679536dcc895411a9f5848d9a0250be7856448c
+  version: 6cf8f02b4ae8ba723ddc64dcfd403e530c06d927
+- name: github.com/ltcsuite/ltcd
+  version: 92a0feb9b86f5971655013115ea4f95949403592
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - chaincfg/chainhash
+  - database
+  - rpcclient
+  - txscript
+  - wire
+- name: github.com/ltcsuite/ltcutil
+  version: a88d7dfb1c02af5dffe005ad21f40c42d9fd5ad0
+  subpackages:
+  - base58
+  - bech32
+  - hdkeychain
+- name: golang.org/x/crypto
+  version: faadfbdc035307d901e69eea569f5dda451a3ee3
+  subpackages:
+  - pbkdf2
+  - ripemd160
+  - scrypt
+  - ssh/terminal
 - name: golang.org/x/net
-  version: 60c41d1de8da134c05b7b40154a9a82bf5b7edb9
+  version: 66aacef3dd8a676686c7ae3716979581e8b03c47
   subpackages:
   - context
   - http2
@@ -58,29 +69,40 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
-  version: d75a52659825e75fff6158388dddc6a5b04f9ba5
+  version: 7a85bfad8bb9558204b9cc9b3624680d2d443a35
   subpackages:
   - unix
+  - windows
 - name: golang.org/x/text
-  version: 44f4f658a783b0cee41fe0a23b8fc91d9c120558
+  version: bd91bbf73e9a4a801adbfb97133c992678533126
   subpackages:
   - secure/bidirule
   - transform
   - unicode/bidi
   - unicode/norm
+- name: google.golang.org/genproto
+  version: 595979c8a7bf586b2d293fb42246bf91a0b893d9
+  subpackages:
+  - googleapis/rpc/status
 - name: google.golang.org/grpc
-  version: b7f1379d3cbbbeb2ca3405852012e237aa05459e
+  version: f92cdcd7dcdc69e81b2d7b338479a19a8723cfa3
   subpackages:
   - codes
+  - connectivity
   - credentials
+  - grpclb/grpc_lb_v1/messages
   - grpclog
   - internal
+  - keepalive
   - metadata
   - naming
   - peer
+  - stats
+  - status
+  - tap
   - transport
 testImports:
 - name: github.com/davecgh/go-spew
-  version: 346938d642f2ec3594ed81d874461961cd0faa76
+  version: a476722483882dd40b8111f0eb64e1d7f43f56e4
   subpackages:
   - spew
