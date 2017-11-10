@@ -14,6 +14,7 @@ import (
 	"github.com/decred/dcrd/blockchain"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/hdkeychain"
 	dcrrpcclient "github.com/decred/dcrd/rpcclient"
 	"github.com/decred/dcrwallet/wallet"
 )
@@ -76,6 +77,7 @@ type Config struct {
 	PoolFees                  float64
 	NoSpreadTicketPurchases   bool
 	VotingAddress             dcrutil.Address
+	VotingXpubExt             *hdkeychain.ExtendedKey // voting wallet external branch extended key
 	TxFee                     int64
 }
 

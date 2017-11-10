@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/hdkeychain"
 	"github.com/decred/dcrwallet/wallet/udb"
 	"github.com/decred/dcrwallet/walletdb"
@@ -117,30 +118,34 @@ func (w *Wallet) branchUsed(n NetworkBackend, branchXpub *hdkeychain.ExtendedKey
 	return false, nil
 }
 
-// findLastUsedAddress returns the child index of the last used child address
-// derived from a branch key.  If no addresses are found, ^uint32(0) is
-// returned.
-func (w *Wallet) findLastUsedAddress(n NetworkBackend, xpub *hdkeychain.ExtendedKey) (uint32, error) {
+// FindLastUsedAddress searches for and returns the last child index of used,
+// non-hardened addresses derived from an account branch key.  There is no
+// guarantee of discovering the last index correctly if there are gaps of unused
+// addresses larger than the gap limit, so it is recommended for software to not
+// create these gaps by respecting a common gap limit.  If no used addresses are
+// found, ^uint32(0) is returned.
+func FindLastUsedAddress(ctx context.Context, n NetworkBackend,
+	branchXpub *hdkeychain.ExtendedKey, gapLimit uint32, params *chaincfg.Params) (uint32, error) {
+
 	var (
 		lastUsed        = ^uint32(0)
-		scanLen         = uint32(w.gapLimit)
-		segments        = hdkeychain.HardenedKeyStart / scanLen
+		segments        = hdkeychain.HardenedKeyStart / gapLimit
 		lo, hi   uint32 = 0, segments - 1
 	)
 Bsearch:
 	for lo <= hi {
 		mid := (hi + lo) / 2
-		addrs, err := deriveChildAddresses(xpub, mid*scanLen, scanLen, w.chainParams)
+		addrs, err := deriveChildAddresses(branchXpub, mid*gapLimit, gapLimit, params)
 		if err != nil {
 			return 0, err
 		}
-		existsBits, err := n.AddressesUsed(context.TODO(), addrs)
+		existsBits, err := n.AddressesUsed(ctx, addrs)
 		if err != nil {
 			return 0, err
 		}
 		for i := len(addrs) - 1; i >= 0; i-- {
 			if existsBits.Get(i) {
-				lastUsed = mid*scanLen + uint32(i)
+				lastUsed = mid*gapLimit + uint32(i)
 				lo = mid + 1
 				continue Bsearch
 			}
@@ -279,7 +284,8 @@ func (w *Wallet) DiscoverActiveAddresses(n NetworkBackend, discoverAccts bool) e
 					return err
 				}
 
-				lastUsed, err := w.findLastUsedAddress(n, branchXpub)
+				lastUsed, err := FindLastUsedAddress(context.TODO(), n, branchXpub,
+					uint32(w.gapLimit), w.chainParams)
 				if err != nil {
 					return err
 				}

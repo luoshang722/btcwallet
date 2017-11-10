@@ -3593,6 +3593,16 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 	return w.chainParams
 }
 
+// GapLimit returns the target maximum number of unused addresses between two
+// used addresses in an account branch.  It is possible to create gaps larger
+// than this but doing so requires the user to explicitly request creating the
+// larger gap.  Respecting the gap limit increases the efficiency of and ease of
+// configuration for discovering what address should be used next at wallet
+// startup.
+func (w *Wallet) GapLimit() uint32 {
+	return uint32(w.gapLimit)
+}
+
 // NeedsAccountsSync returns whether or not the wallet is void of any generated
 // keys and accounts (other than the default account), and records the genesis
 // block as the main chain tip.  When these are both true, an accounts sync

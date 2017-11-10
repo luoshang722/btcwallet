@@ -18,6 +18,7 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/hdkeychain"
 	"github.com/decred/dcrwallet/internal/cfgutil"
 	"github.com/decred/dcrwallet/netparams"
 	"github.com/decred/dcrwallet/ticketbuyer"
@@ -162,23 +163,24 @@ type config struct {
 }
 
 type ticketBuyerOptions struct {
-	AvgPriceMode              string               `long:"avgpricemode" description:"The mode to use for calculating the average price if pricetarget is disabled (vwap, pool, dual)"`
-	AvgPriceVWAPDelta         int                  `long:"avgpricevwapdelta" description:"The number of blocks to use from the current block to calculate the VWAP"`
-	MaxFee                    *cfgutil.AmountFlag  `long:"maxfee" description:"Maximum ticket fee per KB"`
-	MinFee                    *cfgutil.AmountFlag  `long:"minfee" description:"Minimum ticket fee per KB"`
-	FeeSource                 string               `long:"feesource" description:"The fee source to use for ticket fee per KB (median or mean)"`
-	MaxPerBlock               int                  `long:"maxperblock" description:"Maximum tickets per block, with negative numbers indicating buy one ticket every 1-in-n blocks"`
-	BlocksToAvg               int                  `long:"blockstoavg" description:"Number of blocks to average for fees calculation"`
-	FeeTargetScaling          float64              `long:"feetargetscaling" description:"Scaling factor for setting the ticket fee, multiplies by the average fee"`
-	MaxInMempool              int                  `long:"maxinmempool" description:"The maximum number of your tickets allowed in mempool before purchasing more tickets"`
-	ExpiryDelta               int                  `long:"expirydelta" description:"Number of blocks in the future before the ticket expires"`
-	MaxPriceAbsolute          *cfgutil.AmountFlag  `long:"maxpriceabsolute" description:"Maximum absolute price to purchase a ticket"`
-	MaxPriceRelative          float64              `long:"maxpricerelative" description:"Scaling factor for setting the maximum price, multiplies by the average price"`
-	BalanceToMaintainAbsolute *cfgutil.AmountFlag  `long:"balancetomaintainabsolute" description:"Amount of funds to keep in wallet when stake mining"`
-	BalanceToMaintainRelative float64              `long:"balancetomaintainrelative" description:"Proportion of funds to leave in wallet when stake mining"`
-	NoSpreadTicketPurchases   bool                 `long:"nospreadticketpurchases" description:"Do not spread ticket purchases evenly throughout the window"`
-	DontWaitForTickets        bool                 `long:"dontwaitfortickets" description:"Don't wait until your last round of tickets have entered the blockchain to attempt to purchase more"`
-	VotingAddress             *cfgutil.AddressFlag `long:"votingaddress" description:"Purchase tickets with voting rights assigned to this address"`
+	AvgPriceMode              string                   `long:"avgpricemode" description:"The mode to use for calculating the average price if pricetarget is disabled (vwap, pool, dual)"`
+	AvgPriceVWAPDelta         int                      `long:"avgpricevwapdelta" description:"The number of blocks to use from the current block to calculate the VWAP"`
+	MaxFee                    *cfgutil.AmountFlag      `long:"maxfee" description:"Maximum ticket fee per KB"`
+	MinFee                    *cfgutil.AmountFlag      `long:"minfee" description:"Minimum ticket fee per KB"`
+	FeeSource                 string                   `long:"feesource" description:"The fee source to use for ticket fee per KB (median or mean)"`
+	MaxPerBlock               int                      `long:"maxperblock" description:"Maximum tickets per block, with negative numbers indicating buy one ticket every 1-in-n blocks"`
+	BlocksToAvg               int                      `long:"blockstoavg" description:"Number of blocks to average for fees calculation"`
+	FeeTargetScaling          float64                  `long:"feetargetscaling" description:"Scaling factor for setting the ticket fee, multiplies by the average fee"`
+	MaxInMempool              int                      `long:"maxinmempool" description:"The maximum number of your tickets allowed in mempool before purchasing more tickets"`
+	ExpiryDelta               int                      `long:"expirydelta" description:"Number of blocks in the future before the ticket expires"`
+	MaxPriceAbsolute          *cfgutil.AmountFlag      `long:"maxpriceabsolute" description:"Maximum absolute price to purchase a ticket"`
+	MaxPriceRelative          float64                  `long:"maxpricerelative" description:"Scaling factor for setting the maximum price, multiplies by the average price"`
+	BalanceToMaintainAbsolute *cfgutil.AmountFlag      `long:"balancetomaintainabsolute" description:"Amount of funds to keep in wallet when stake mining"`
+	BalanceToMaintainRelative float64                  `long:"balancetomaintainrelative" description:"Proportion of funds to leave in wallet when stake mining"`
+	NoSpreadTicketPurchases   bool                     `long:"nospreadticketpurchases" description:"Do not spread ticket purchases evenly throughout the window"`
+	DontWaitForTickets        bool                     `long:"dontwaitfortickets" description:"Don't wait until your last round of tickets have entered the blockchain to attempt to purchase more"`
+	VotingAddress             *cfgutil.AddressFlag     `long:"votingaddress" description:"Purchase tickets with voting rights assigned to this address"`
+	VotingXpub                *cfgutil.ExtendedKeyFlag `long:"votingxpub" description:"Purchase tickets with voting rights assigned to child addresses of this account extended pubkey"`
 
 	// Deprecated options
 	MaxPriceScale         float64             `long:"maxpricescale" description:"DEPRECATED -- Attempt to prevent the stake difficulty from going above this multiplier (>1.0) by manipulation, 0 to disable"`
@@ -379,6 +381,7 @@ func loadConfig(ctx context.Context) (*config, []string, error) {
 			BalanceToMaintainAbsolute: cfgutil.NewAmountFlag(defaultBalanceToMaintainAbsolute),
 			BalanceToMaintainRelative: defaultBalanceToMaintainRelative,
 			VotingAddress:             cfgutil.NewAddressFlag(nil),
+			VotingXpub:                cfgutil.NewExtendedKeyFlag(nil),
 		},
 	}
 
@@ -907,6 +910,34 @@ func loadConfig(ctx context.Context) (*config, []string, error) {
 			votingAddress = cfg.TicketAddress.Address
 		}
 	}
+	votingXpub := cfg.TBOpts.VotingXpub.ExtendedKey
+	var votingXpubExt *hdkeychain.ExtendedKey
+	if votingXpub != nil && votingAddress != nil {
+		err := fmt.Errorf("ticketbuyer.votingaddress and " +
+			"ticketbuyer.votingxpub may not be set simultaneously")
+		fmt.Fprintln(os.Stderr, err)
+		return loadConfigError(err)
+	}
+	if votingXpub != nil {
+		if votingXpub.IsPrivate() {
+			err := fmt.Errorf("ticketbuyer.votingxpub must be an extended " +
+				"public key, not an extended private key")
+			fmt.Fprintln(os.Stderr, err)
+			return loadConfigError(err)
+		}
+		if !votingXpub.IsForNet(activeNet.Params) {
+			err := fmt.Errorf("ticketbuyer.votingxpub is not intended for "+
+				"use on %v", activeNet.Params.Name)
+			fmt.Fprintln(os.Stderr, err)
+			return loadConfigError(err)
+		}
+		var err error
+		votingXpubExt, err = votingXpub.Child(0) // external branch
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return loadConfigError(err)
+		}
+	}
 
 	// Build ticketbuyer config
 	cfg.tbCfg = ticketbuyer.Config{
@@ -930,6 +961,7 @@ func loadConfig(ctx context.Context) (*config, []string, error) {
 		PoolFees:                  cfg.PoolFees,
 		NoSpreadTicketPurchases:   cfg.TBOpts.NoSpreadTicketPurchases,
 		VotingAddress:             votingAddress,
+		VotingXpubExt:             votingXpubExt,
 		TxFee:                     int64(cfg.RelayFee.Amount),
 	}
 
