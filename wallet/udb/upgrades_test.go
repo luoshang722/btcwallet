@@ -34,6 +34,7 @@ var dbUpgradeTests = [...]struct {
 	// No upgrade test for V7, it is a backwards-compatible upgrade
 	{verifyV8Upgrade, "v7.db.gz"},
 	// No upgrade test for V9, it is a fix for V8 and the previous test still applies
+	// TODO: V10 upgrade test
 }
 
 var pubPass = []byte("public")
@@ -389,9 +390,9 @@ func verifyV8Upgrade(t *testing.T, db walletdb.DB) {
 			}
 
 			if rec.MsgTx.Expiry != wire.NoExpiryValue {
-				minedTxWithExpiryCount += 1
+				minedTxWithExpiryCount++
 			} else {
-				minedTxWithoutExpiryCount += 1
+				minedTxWithoutExpiryCount++
 			}
 			return nil
 		})

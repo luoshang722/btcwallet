@@ -56,6 +56,7 @@
   branch = "master"
   name = "github.com/decred/dcrd"
   packages = [
+    "addrmgr",
     "blockchain",
     "blockchain/indexers",
     "blockchain/internal/dbnamespace",
@@ -68,6 +69,7 @@
     "chaincfg",
     "chaincfg/chainec",
     "chaincfg/chainhash",
+    "connmgr",
     "database",
     "dcrec/edwards",
     "dcrec/secp256k1",
@@ -210,6 +212,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "890953b366de351f13c362e03a2d3d137bffc528185ceb18426561fe20d2e651"
+  inputs-digest = "be5a8edd5127287fbdc6fc270fba9881ccdb604cb04e2d9cd52a73820b26cd89"
   solver-name = "gps-cdcl"
   solver-version = 1

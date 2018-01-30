@@ -5,8 +5,11 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrwallet/errors"
 	"github.com/decred/dcrwallet/wallet"
 	"golang.org/x/sync/errgroup"
@@ -86,6 +89,9 @@ func (s *RPCSyncer) handleNotifications(ctx context.Context) error {
 	// block fails to attach, the error is fatal.  Otherwise, errors are logged.
 	connectingBlocks := false
 
+	sidechains := new(wallet.SidechainForest)
+	var relevantTxs map[chainhash.Hash][]*wire.MsgTx
+
 	c := s.rpcClient.notifications()
 	for {
 		select {
@@ -103,18 +109,49 @@ func (s *RPCSyncer) handleNotifications(ctx context.Context) error {
 			switch n := n.(type) {
 			case blockConnected:
 				op = "dcrd.jsonrpc.blockconnected"
-				err = s.wallet.ConnectBlock(n.blockHeader, n.transactions)
-				if err == nil {
-					connectingBlocks = true
+				header := new(wire.BlockHeader)
+				err = header.Deserialize(bytes.NewReader(n.blockHeader))
+				if err != nil {
+					break
 				}
-				nonFatal = !connectingBlocks
+				blockHash := header.BlockHash()
+				getCfilter := s.rpcClient.GetCFilterAsync(&blockHash, wire.GCSFilterRegular)
+				txs := make([]*wire.MsgTx, 0, len(n.transactions))
+				for _, tx := range n.transactions {
+					msgTx := new(wire.MsgTx)
+					err = msgTx.Deserialize(bytes.NewReader(tx))
+					if err != nil {
+						break
+					}
+					txs = append(txs, msgTx)
+				}
+				if relevantTxs == nil {
+					relevantTxs = make(map[chainhash.Hash][]*wire.MsgTx)
+				}
+				relevantTxs[blockHash] = txs
+				f, err := getCfilter.Receive()
+				if err != nil {
+					break
+				}
 
-			case blockDisconnected:
+				sidechainNode := wallet.NewSidechainNode(header, &blockHash, f)
+				sidechains.AddBlockNode(sidechainNode)
+
+				bestChain, err := s.wallet.EvaluateBestChain(sidechains)
+				if err != nil {
+					break
+				}
+				if len(bestChain) != 0 {
+					_, err = s.wallet.ChainSwitch(bestChain, relevantTxs)
+					if err == nil {
+						connectingBlocks = true
+					}
+					nonFatal = !connectingBlocks
+					relevantTxs = nil
+				}
+
+			case blockDisconnected, reorganization:
 				continue // These notifications are ignored
-
-			case reorganization:
-				op = "dcrd.jsonrpc.reorganizing"
-				err = s.wallet.StartReorganize(n.oldHash, n.newHash, n.oldHeight, n.newHeight)
 
 			case relevantTxAccepted:
 				op = "dcrd.jsonrpc.relevanttxaccepted"
@@ -188,27 +225,27 @@ func (s *RPCSyncer) startupSync(ctx context.Context) error {
 
 	n := BackendFromRPCClient(s.rpcClient.Client)
 
-	// Discover any addresses for this wallet that have not yet been created.
-	err = s.wallet.DiscoverActiveAddresses(n, !s.wallet.Locked())
+	// Fetch headers for unseen blocks in the main chain, determine whether a
+	// rescan is necessary, and when to begin it.
+	fetchedHeaderCount, rescanStart, _, _, _, err := s.wallet.FetchHeaders(ctx, n)
 	if err != nil {
 		return err
 	}
 
 	// Load transaction filters with all active addresses and watched outpoints.
-	err = s.wallet.LoadActiveDataFilters(n)
-	if err != nil {
-		return err
-	}
-
-	// Fetch headers for unseen blocks in the main chain, determine whether a
-	// rescan is necessary, and when to begin it.
-	fetchedHeaderCount, rescanStart, _, _, _, err := s.wallet.FetchHeaders(n)
+	err = s.wallet.LoadActiveDataFilters(ctx, n)
 	if err != nil {
 		return err
 	}
 
 	// Rescan when necessary.
 	if fetchedHeaderCount != 0 {
+		// Discover any addresses for this wallet that have not yet been created.
+		err = s.wallet.DiscoverActiveAddresses(ctx, n, &rescanStart, !s.wallet.Locked())
+		if err != nil {
+			return err
+		}
+
 		err := s.wallet.Rescan(ctx, n, &rescanStart)
 		if err != nil {
 			return err

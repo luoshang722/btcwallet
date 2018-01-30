@@ -126,6 +126,10 @@ type config struct {
 	ProxyUser        string                  `long:"proxyuser" description:"Username for proxy server"`
 	ProxyPass        string                  `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 
+	// SPV options
+	SPV        bool     `long:"spv"`
+	SPVConnect []string `long:"spvconnect"`
+
 	// RPC server options
 	//
 	// The legacy server is still enabled by default (and eventually will be
@@ -787,6 +791,13 @@ func loadConfig(ctx context.Context) (*config, []string, error) {
 					}
 				}
 			}
+		}
+	}
+
+	for i, p := range cfg.SPVConnect {
+		cfg.SPVConnect[i], err = cfgutil.NormalizeAddress(p, activeNet.Params.DefaultPort)
+		if err != nil {
+			return loadConfigError(err)
 		}
 	}
 

@@ -16,6 +16,8 @@ import (
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/gcs"
+	"github.com/decred/dcrd/gcs/blockcf"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrwallet/walletdb"
 	_ "github.com/decred/dcrwallet/walletdb/bdb"
@@ -129,6 +131,14 @@ func makeHeaderDataSlice(headers ...*wire.BlockHeader) []BlockHeaderData {
 		data = append(data, makeHeaderData(h))
 	}
 	return data
+}
+
+func emptyFilters(n int) []*gcs.Filter {
+	f := make([]*gcs.Filter, n)
+	for i := range f {
+		f[i], _ = gcs.FromBytes(0, blockcf.P, nil)
+	}
+	return f
 }
 
 func makeBlockMeta(h *wire.BlockHeader) *BlockMeta {

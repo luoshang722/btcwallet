@@ -384,7 +384,7 @@ func (w *Wallet) txToOutputsInternal(op errors.Op, outputs []*wire.TxOut, accoun
 
 		// TODO: this can be improved by not using the same codepath as notified
 		// relevant transactions, since this does a lot of extra work.
-		err = w.processTransaction(dbtx, rec, nil, nil)
+		err = w.processTransactionRecord(dbtx, rec, nil, nil)
 		if err != nil {
 			return err
 		}
@@ -547,8 +547,6 @@ func (w *Wallet) txToMultisigInternal(op errors.Op, dbtx walletdb.ReadWriteTx, a
 
 	// Request updates from dcrd for new transactions sent to this
 	// script hash address.
-	utilAddrs := make([]dcrutil.Address, 1)
-	utilAddrs[0] = scAddr
 	err = n.LoadTxFilter(context.TODO(), false, []dcrutil.Address{scAddr}, nil)
 	if err != nil {
 		return txToMultisigError(errors.E(op, err))
@@ -1151,7 +1149,7 @@ func (w *Wallet) purchaseTickets(op errors.Op, req purchaseTicketRequest) ([]*ch
 		// Open a DB update to insert and publish the transaction.  If
 		// publishing fails, the update is rolled back.
 		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
-			err = w.processTransaction(dbtx, rec, nil, nil)
+			err = w.processTransactionRecord(dbtx, rec, nil, nil)
 			if err != nil {
 				return err
 			}

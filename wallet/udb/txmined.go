@@ -17,6 +17,8 @@ import (
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/gcs"
+	"github.com/decred/dcrd/gcs/blockcf"
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrwallet/errors"
@@ -176,27 +178,35 @@ func (s *Store) MainChainTip(ns walletdb.ReadBucket) (chainhash.Hash, int32) {
 	return hash, height
 }
 
-// ExtendMainChain inserts a block header into the database.  It must connect to
-// the existing tip block.
+// ExtendMainChain inserts a block header and compact filter into the database.
+// It must connect to the existing tip block.
 //
 // If the block is already inserted and part of the main chain, an errors.Exist
 // error is returned.
-func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *BlockHeaderData) error {
-	height := header.SerializedHeader.Height()
+//
+// The main chain tip may not be extended unless compact filters have been saved
+// for all existing main chain blocks.
+func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *wire.BlockHeader, f *gcs.Filter) error {
+	height := int32(header.Height)
 	if height < 1 {
 		return errors.E(errors.Invalid, "block 0 cannot be added")
+	}
+	v := ns.Get(rootHaveCFilters)
+	if len(v) != 1 || v[0] != 1 {
+		return errors.E(errors.Invalid, "main chain may not be extended without first saving all previous cfilters")
 	}
 
 	headerBucket := ns.NestedReadWriteBucket(bucketHeaders)
 
-	headerParent := extractBlockHeaderParentHash(header.SerializedHeader[:])
+	blockHash := header.BlockHash()
+
 	currentTipHash := ns.Get(rootTipBlock)
-	if !bytes.Equal(headerParent, currentTipHash) {
+	if !bytes.Equal(header.PrevBlock[:], currentTipHash) {
 		// Return a special error if it is a duplicate of an existing block in
 		// the main chain (NOT the headers bucket, since headers are never
 		// pruned).
 		_, v := existsBlockRecord(ns, height)
-		if v != nil && bytes.Equal(extractRawBlockRecordHash(v), header.BlockHash[:]) {
+		if v != nil && bytes.Equal(extractRawBlockRecordHash(v), blockHash[:]) {
 			return errors.E(errors.Exist, "block already recorded in main chain")
 		}
 		return errors.E(errors.Invalid, "not direct child of current tip")
@@ -209,9 +219,8 @@ func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *BlockHeader
 		return errors.E(errors.Invalid, "invalid height for next block")
 	}
 
-	vb := extractBlockHeaderVoteBits(header.SerializedHeader[:])
 	var err error
-	if approvesParent(vb) {
+	if approvesParent(header.VoteBits) {
 		err = stakeValidate(ns, currentTipHeight)
 	} else {
 		err = stakeInvalidate(ns, currentTipHeight)
@@ -221,21 +230,155 @@ func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *BlockHeader
 	}
 
 	// Add the header
-	err = headerBucket.Put(header.BlockHash[:], header.SerializedHeader[:])
+	var headerBuffer bytes.Buffer
+	err = header.Serialize(&headerBuffer)
+	if err != nil {
+		return err
+	}
+	err = headerBucket.Put(blockHash[:], headerBuffer.Bytes())
 	if err != nil {
 		return errors.E(errors.IO, err)
 	}
 
 	// Update the tip block
-	err = ns.Put(rootTipBlock, header.BlockHash[:])
+	err = ns.Put(rootTipBlock, blockHash[:])
 	if err != nil {
 		return errors.E(errors.IO, err)
 	}
 
 	// Add an empty block record
 	blockKey := keyBlockRecord(height)
-	blockVal := valueBlockRecordEmptyFromHeader(&header.BlockHash, &header.SerializedHeader)
-	return putRawBlockRecord(ns, blockKey, blockVal)
+	blockVal := valueBlockRecordEmptyFromHeader(blockHash[:], headerBuffer.Bytes())
+	err = putRawBlockRecord(ns, blockKey, blockVal)
+	if err != nil {
+		return err
+	}
+
+	// Save the compact filter
+	return putRawCFilter(ns, blockHash[:], f.NBytes())
+}
+
+// IsMissingMainChainCFilters returns whether all compact filters for main chain
+// blocks have been recorded to the database after the upgrade which began to
+// require them to extend the main chain.  If compact filters are missing, they
+// must be added using InsertMissingCFilters.
+func (s *Store) IsMissingMainChainCFilters(dbtx walletdb.ReadTx) bool {
+	v := dbtx.ReadBucket(wtxmgrBucketKey).Get(rootHaveCFilters)
+	return len(v) != 1 || v[0] == 0
+}
+
+// InsertMissingCFilters records compact filters for each main chain block
+// specified by blockHashes.  This is used to add the additional required
+// cfilters after upgrading a database to version TODO as recording cfilters
+// becomes a required part of extending the main chain.  This method may be
+// called incrementally to record all main chain block cfilters.  When all
+// cfilters of the main chain are recorded, extending the main chain becomes
+// possible again.
+func (s *Store) InsertMissingCFilters(dbtx walletdb.ReadWriteTx, blockHashes []*chainhash.Hash, filters []*gcs.Filter) error {
+	ns := dbtx.ReadWriteBucket(wtxmgrBucketKey)
+	v := ns.Get(rootHaveCFilters)
+	if len(v) == 1 && v[0] != 0 {
+		return errors.E(errors.Invalid, "all cfilters for main chain blocks are already recorded")
+	}
+
+	if len(blockHashes) != len(filters) {
+		return errors.E(errors.Invalid, "slices must have equal len")
+	}
+	if len(blockHashes) == 0 {
+		return nil
+	}
+
+	for i, blockHash := range blockHashes {
+		// Ensure that blockHashes are ordered and that all previous cfilters in the
+		// main chain are known.
+		ok := i == 0 && *blockHash == *s.chainParams.GenesisHash
+		if !ok {
+			header := existsBlockHeader(ns, blockHash[:])
+			if header == nil {
+				return errors.E(errors.NotExist, errors.Errorf("missing header for block %v", blockHash))
+			}
+			parentHash := extractBlockHeaderParentHash(header)
+			if i == 0 {
+				_, err := fetchRawCFilter(ns, parentHash)
+				ok = err == nil
+			} else {
+				ok = bytes.Equal(parentHash, blockHashes[i-1][:])
+			}
+		}
+		if !ok {
+			return errors.E(errors.Invalid, "block hashes are not ordered or previous cfilters are missing")
+		}
+
+		// Record cfilter for this block
+		err := putRawCFilter(ns, blockHash[:], filters[i].NBytes())
+		if err != nil {
+			return err
+		}
+	}
+
+	// Mark all main chain cfilters as saved if the last block hash is the main
+	// chain tip.
+	tip, _ := s.MainChainTip(ns)
+	if bytes.Equal(tip[:], blockHashes[len(blockHashes)-1][:]) {
+		err := ns.Put(rootHaveCFilters, []byte{1})
+		if err != nil {
+			return errors.E(errors.IO, err)
+		}
+	}
+
+	return nil
+}
+
+// BlockCFilter is a compact filter for a Decred block.
+type BlockCFilter struct {
+	BlockHash chainhash.Hash
+	Filter    *gcs.Filter
+}
+
+// GetMainChainCFilters returns compact filters from the main chain, starting at
+// startHash, copying as many as possible into the storage slice and returning a
+// subslice for the total number of results.  If the start hash is not in the
+// main chain, this function errors.  If inclusive is true, the startHash is
+// included in the results, otherwise only blocks after the startHash are
+// included.
+func (s *Store) GetMainChainCFilters(dbtx walletdb.ReadTx, startHash *chainhash.Hash,
+	inclusive bool, storage []*BlockCFilter) ([]*BlockCFilter, error) {
+
+	ns := dbtx.ReadBucket(wtxmgrBucketKey)
+	header := ns.NestedReadBucket(bucketHeaders).Get(startHash[:])
+	if header == nil {
+		return nil, errors.E(errors.NotExist, errors.Errorf("starting block %v not found", startHash))
+	}
+	height := extractBlockHeaderHeight(header)
+	if !inclusive {
+		height++
+	}
+
+	blockRecords := ns.NestedReadBucket(bucketBlocks)
+
+	storageUsed := 0
+	for storageUsed < len(storage) {
+		v := blockRecords.Get(keyBlockRecord(height))
+		if v == nil {
+			break
+		}
+		blockHash := extractRawBlockRecordHash(v)
+		rawFilter, err := fetchRawCFilter(ns, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		f, err := gcs.FromNBytes(blockcf.P, rawFilter)
+		if err != nil {
+			return nil, err
+		}
+		bf := &BlockCFilter{Filter: f}
+		copy(bf.BlockHash[:], blockHash)
+		storage[storageUsed] = bf
+
+		height++
+		storageUsed++
+	}
+	return storage[:storageUsed], nil
 }
 
 // log2 calculates an integer approximation of log2(x).  This is used to
@@ -622,21 +765,33 @@ func stakeInvalidate(ns walletdb.ReadWriteBucket, height int32) error {
 	return putMinedBalance(ns, minedBalance)
 }
 
-// InsertMainChainHeaders permanently saves block headers.  Headers should be in
-// order of increasing heights and there should not be any gaps between blocks.
-// After inserting headers, if the existing recorded tip block is behind the
-// last main chain block header that was inserted, a chain switch occurs and the
-// new tip block is recorded.
-func (s *Store) InsertMainChainHeaders(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, headers []BlockHeaderData) error {
+// InsertMainChainHeaders permanently saves block headers and compact filters.
+// Headers should be in order of increasing heights and there should not be any
+// gaps between blocks. If the block described by the last header is not in the
+// currently-recorded main chain, the main chain is extended or a chain switch
+// occurs and the new tip block is recorded.
+//
+// Inserting block headers requires all missing compact filters from before the
+// database upgrade that introduced them as a requirement to have been
+// previously saved using InsertMissingCFilters.
+//
+// If the main chain tip block changes, the block hash of last block to remain
+// in the chain (the common ancestor) is returned.  The common ancestor is the
+// fork point if any blocks needed to be removed from the main chain.  Otherwise
+// the zero hash is returned.
+func (s *Store) InsertMainChainHeaders(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, headers []BlockHeaderData, filters []*gcs.Filter) (commonAncestor chainhash.Hash, err error) {
 	if len(headers) == 0 {
-		return nil
+		return
+	}
+	if len(headers) != len(filters) {
+		return chainhash.Hash{}, errors.E(errors.Invalid, "header and filter slices must have equal len")
 	}
 
 	// If the first header is not yet saved, make sure the parent is.
 	if existsBlockHeader(ns, keyBlockHeader(&headers[0].BlockHash)) == nil {
 		parentHash := extractBlockHeaderParentHash(headers[0].SerializedHeader[:])
 		if existsBlockHeader(ns, parentHash) == nil {
-			return errors.E(errors.Invalid, "missing parent of first header")
+			return chainhash.Hash{}, errors.E(errors.Invalid, errors.Errorf("missing parent %v of first header %v", parentHash, &headers[0].BlockHash))
 		}
 	}
 
@@ -648,7 +803,7 @@ func (s *Store) InsertMainChainHeaders(ns walletdb.ReadWriteBucket, addrmgrNs wa
 	if candidateTipHeight >= currentTipHeight {
 		err := ns.Put(rootTipBlock, candidateTip.BlockHash[:])
 		if err != nil {
-			return errors.E(errors.IO, err)
+			return chainhash.Hash{}, errors.E(errors.IO, err)
 		}
 	}
 
@@ -657,35 +812,49 @@ func (s *Store) InsertMainChainHeaders(ns walletdb.ReadWriteBucket, addrmgrNs wa
 		header := &headers[i].SerializedHeader
 
 		// Any blocks known to not exist on this main chain are to be removed.
+		// The fork point is set to this header's parent block for the first
+		// block not found in the main chain.
 		height := extractBlockHeaderHeight(header[:])
 		rk, rv := existsBlockRecord(ns, height)
 		if rv != nil {
 			recHash := extractRawBlockRecordHash(rv)
 			if !bytes.Equal(hash[:], recHash) {
-				err := s.rollback(ns, addrmgrNs, height)
+				err = s.rollback(ns, addrmgrNs, height)
 				if err != nil {
-					return err
+					return
 				}
-				blockVal := valueBlockRecordEmptyFromHeader(hash, header)
+				blockVal := valueBlockRecordEmptyFromHeader(hash[:], header[:])
 				err = putRawBlockRecord(ns, rk, blockVal)
 				if err != nil {
-					return err
+					return
+				}
+				if commonAncestor == (chainhash.Hash{}) {
+					copy(commonAncestor[:], extractBlockHeaderParentHash(header[:]))
 				}
 			}
 		} else {
-			blockVal := valueBlockRecordEmptyFromHeader(hash, header)
-			err := putRawBlockRecord(ns, rk, blockVal)
+			blockVal := valueBlockRecordEmptyFromHeader(hash[:], header[:])
+			err = putRawBlockRecord(ns, rk, blockVal)
 			if err != nil {
-				return err
+				return
+			}
+			if commonAncestor == (chainhash.Hash{}) {
+				copy(commonAncestor[:], extractBlockHeaderParentHash(header[:]))
 			}
 		}
 
 		// Insert the header.
 		k := keyBlockHeader(hash)
 		v := header[:]
-		err := putRawBlockHeader(ns, k, v)
+		err = putRawBlockHeader(ns, k, v)
 		if err != nil {
-			return err
+			return
+		}
+
+		// Insert the compact filter
+		err = putRawCFilter(ns, hash[:], filters[i].NBytes())
+		if err != nil {
+			return
 		}
 
 		// Handle stake validation of the parent block.
@@ -697,11 +866,11 @@ func (s *Store) InsertMainChainHeaders(ns walletdb.ReadWriteBucket, addrmgrNs wa
 			err = stakeInvalidate(ns, parentHeight)
 		}
 		if err != nil {
-			return err
+			return
 		}
 	}
 
-	return nil
+	return
 }
 
 // GetMainChainBlockHashForHeight returns the block hash of the block on the
@@ -722,6 +891,21 @@ func (s *Store) GetMainChainBlockHashForHeight(ns walletdb.ReadBucket, height in
 // from the DB and are usable outside of the transaction.
 func (s *Store) GetSerializedBlockHeader(ns walletdb.ReadBucket, blockHash *chainhash.Hash) ([]byte, error) {
 	return fetchRawBlockHeader(ns, keyBlockHeader(blockHash))
+}
+
+// GetBlockHeader returns the block header for the block specified by its hash.
+func (s *Store) GetBlockHeader(dbtx walletdb.ReadTx, blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+	ns := dbtx.ReadBucket(wtxmgrBucketKey)
+	serialized, err := fetchRawBlockHeader(ns, keyBlockHeader(blockHash))
+	if err != nil {
+		return nil, err
+	}
+	header := new(wire.BlockHeader)
+	err = header.Deserialize(bytes.NewReader(serialized))
+	if err != nil {
+		return nil, errors.E(errors.IO, err)
+	}
+	return header, nil
 }
 
 // BlockInMainChain returns whether a block identified by its hash is in the
@@ -774,8 +958,7 @@ func (s *Store) GetMainChainBlockHashes(ns walletdb.ReadBucket, startHash *chain
 
 	header := ns.NestedReadBucket(bucketHeaders).Get(startHash[:])
 	if header == nil {
-		err := errors.E(errors.NotExist, errors.Errorf("block %v header not found", startHash))
-		return nil, err
+		return nil, errors.E(errors.NotExist, errors.Errorf("starting block %v not found", startHash))
 	}
 	height := extractBlockHeaderHeight(header)
 
@@ -2063,6 +2246,23 @@ func (s *Store) UnspentOutpoints(ns walletdb.ReadBucket) ([]wire.OutPoint, error
 	log.Tracef("%v many utxo outpoints found", len(unspent))
 
 	return unspent, nil
+}
+
+// IsUnspentOutpoint returns whether the outpoint is recorded as a wallet UTXO.
+func (s *Store) IsUnspentOutpoint(dbtx walletdb.ReadTx, op *wire.OutPoint) bool {
+	ns := dbtx.ReadBucket(wtxmgrBucketKey)
+	k := canonicalOutPoint(&op.Hash, op.Index)
+	if v := ns.NestedReadBucket(bucketUnspent); v != nil {
+		// Output is mined and not spent by any other mined tx, but may be spent
+		// by an unmined transaction.
+		return existsRawUnminedInput(ns, k) == nil
+	}
+	if v := existsRawUnminedCredit(ns, k); v != nil {
+		// Output is in an unmined transation, but may be spent by another
+		// unmined transaction.
+		return existsRawUnminedInput(ns, k) == nil
+	}
+	return false
 }
 
 // UnspentTickets returns all unspent tickets that are known for this wallet.

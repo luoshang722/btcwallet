@@ -22,7 +22,6 @@ import (
 	"github.com/btcsuite/websocket"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/dcrjson"
-	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/errors"
 	"github.com/decred/dcrwallet/loader"
 	"github.com/decred/dcrwallet/ticketbuyer"
@@ -59,12 +58,8 @@ func (c *websocketClient) send(b []byte) error {
 // Server holds the items the RPC server may need to access (auth,
 // config, shutdown, etc.)
 type Server struct {
-	httpServer   http.Server
-	walletLoader *loader.Loader
-	// NOTE: The chainClient field of the server struct can be changed at any time
-	// by the reconnection loop goroutine for example, using this field directly
-	// will cause a data race.  Use Server.GetChainServer instead.
-	chainClient       *chain.RPCClient
+	httpServer        http.Server
+	walletLoader      *loader.Loader
 	ticketbuyerConfig *ticketbuyer.Config
 	handlerMu         sync.Mutex
 	listeners         []net.Listener
@@ -236,25 +231,6 @@ func (s *Server) Stop() {
 
 	// Wait for all remaining goroutines to exit.
 	s.wg.Wait()
-}
-
-// SetChainServer sets the chain server client component needed to run a fully
-// functional decred wallet RPC server.  This can be called to enable RPC
-// passthrough even before a loaded wallet is set, but the wallet's RPC client
-// is preferred.
-func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
-	s.handlerMu.Lock()
-	s.chainClient = chainClient
-	s.handlerMu.Unlock()
-}
-
-// requireChainClient gets the chain server client component needed to run a
-// fully functional decred wallet RPC server.
-func (s *Server) requireChainClient() (*chain.RPCClient, bool) {
-	s.handlerMu.Lock()
-	chainClient := s.chainClient
-	s.handlerMu.Unlock()
-	return chainClient, chainClient != nil
 }
 
 // handlerClosure creates a closure function for handling requests of the given

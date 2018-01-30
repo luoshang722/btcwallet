@@ -74,7 +74,8 @@ func TestStakeInvalidationOfTip(t *testing.T) {
 		}
 
 		headerData := makeHeaderDataSlice(block1Header, block2Header)
-		err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData)
+		filters := emptyFilters(2)
+		_, err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData, filters)
 		if err != nil {
 			return err
 		}
@@ -117,7 +118,8 @@ func TestStakeInvalidationOfTip(t *testing.T) {
 		// block 2.
 		t.Log("Invalidating block 2")
 		headerData = makeHeaderDataSlice(block3Header)
-		err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData)
+		filters = emptyFilters(1)
+		_, err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData, filters)
 		if err != nil {
 			return err
 		}
@@ -197,7 +199,8 @@ func TestStakeInvalidationTxInsert(t *testing.T) {
 		addrmgrNs := tx.ReadBucket(waddrmgrBucketKey)
 
 		headerData := makeHeaderDataSlice(block1Header, block2Header, block3Header)
-		err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData)
+		filters := emptyFilters(3)
+		_, err = s.InsertMainChainHeaders(ns, addrmgrNs, headerData, filters)
 		if err != nil {
 			return err
 		}

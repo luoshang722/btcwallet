@@ -10,21 +10,26 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"time"
 
+	"github.com/decred/dcrd/addrmgr"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/errors"
 	"github.com/decred/dcrwallet/internal/prompt"
 	"github.com/decred/dcrwallet/internal/zero"
 	ldr "github.com/decred/dcrwallet/loader"
+	"github.com/decred/dcrwallet/p2p"
 	"github.com/decred/dcrwallet/rpc/legacyrpc"
 	"github.com/decred/dcrwallet/rpc/rpcserver"
+	"github.com/decred/dcrwallet/spv"
 	"github.com/decred/dcrwallet/version"
 	"github.com/decred/dcrwallet/wallet"
 )
@@ -265,14 +270,20 @@ func run(ctx context.Context) error {
 	defer loader.StopTicketPurchase()
 
 	// When not running with --noinitialload, it is the main package's
-	// responsibility to connect the loaded wallet to the dcrd RPC server for
-	// wallet synchronization.  This function blocks until cancelled.
+	// responsibility to synchronize the wallet with the network through SPV or
+	// the trusted dcrd server.  This blocks until cancelled.
 	if !cfg.NoInitialLoad {
 		if done(ctx) {
 			return ctx.Err()
 		}
 
-		rpcClientConnectLoop(ctx, passphrase, jsonRPCServer, loader)
+		if cfg.SPV {
+			loader.RunAfterLoad(func(w *wallet.Wallet) {
+				spvLoop(ctx, w, loader)
+			})
+		} else {
+			rpcClientConnectLoop(ctx, passphrase, jsonRPCServer, loader)
+		}
 	}
 
 	// Wait until shutdown is signaled before returning and running deferred
@@ -363,6 +374,26 @@ func startPromptPass(ctx context.Context, w *wallet.Wallet) []byte {
 	}
 }
 
+func spvLoop(ctx context.Context, w *wallet.Wallet, loader *ldr.Loader) {
+	addr := &net.TCPAddr{IP: net.ParseIP("::1"), Port: 19108}
+	amgrDir := filepath.Join(cfg.AppDataDir.Value, w.ChainParams().Name)
+	amgr := addrmgr.New(amgrDir, net.LookupIP) // TODO: be mindful of tor
+	lp := p2p.NewLocalPeer(w.ChainParams(), addr, amgr)
+	syncer := spv.NewSyncer(w, lp)
+	if len(cfg.SPVConnect) > 0 {
+		syncer.SetPersistantPeers(cfg.SPVConnect)
+	}
+	w.SetNetworkBackend(syncer)
+	loader.SetNetworkBackend(syncer)
+	for {
+		err := syncer.Run(ctx, true)
+		if done(ctx) {
+			return
+		}
+		log.Errorf("SPV synchronization ended: %v", err)
+	}
+}
+
 // rpcClientConnectLoop loops forever, attempting to create a connection to the
 // consensus RPC server.  If this connection succeeds, the RPC client is used as
 // the loaded wallet's network backend and used to keep the wallet synchronized
@@ -390,10 +421,7 @@ func rpcClientConnectLoop(ctx context.Context, passphrase []byte, jsonRPCServer 
 
 		n := chain.BackendFromRPCClient(chainClient.Client)
 		w.SetNetworkBackend(n)
-		if jsonRPCServer != nil {
-			jsonRPCServer.SetChainServer(chainClient)
-		}
-		loader.SetChainClient(chainClient.Client)
+		loader.SetNetworkBackend(n)
 
 		if cfg.EnableTicketBuyer {
 			err = loader.StartTicketPurchase(passphrase, &cfg.tbCfg)
@@ -417,10 +445,7 @@ func rpcClientConnectLoop(ctx context.Context, passphrase []byte, jsonRPCServer 
 		// Disassociate the RPC client from all subsystems until reconnection
 		// occurs.
 		w.SetNetworkBackend(nil)
-		if jsonRPCServer != nil {
-			jsonRPCServer.SetChainServer(nil)
-		}
-		loader.SetChainClient(nil)
+		loader.SetNetworkBackend(nil)
 		loader.StopTicketPurchase()
 	}
 }

@@ -380,7 +380,7 @@ func (w *Wallet) RevokeTickets(chainClient *dcrrpcclient.Client) error {
 		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 			// Could be more efficient by avoiding processTransaction, as we
 			// know it is a revocation.
-			err = w.processTransaction(dbtx, rec, nil, nil)
+			err = w.processTransactionRecord(dbtx, rec, nil, nil)
 			if err != nil {
 				return errors.E(op, err)
 			}

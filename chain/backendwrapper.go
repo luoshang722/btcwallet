@@ -7,14 +7,16 @@ package chain
 import (
 	"context"
 	"encoding/hex"
+	"io"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/gcs"
 	"github.com/decred/dcrd/rpcclient"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrwallet/errors"
 	"github.com/decred/dcrwallet/wallet"
-	"github.com/jrick/bitset"
+	"golang.org/x/sync/errgroup"
 )
 
 type rpcBackend struct {
@@ -42,16 +44,58 @@ func RPCClientFromBackend(n wallet.NetworkBackend) (*rpcclient.Client, error) {
 	return b.rpcClient, nil
 }
 
-func (b *rpcBackend) GetHeaders(ctx context.Context, blockLocators []*chainhash.Hash, hashStop *chainhash.Hash) ([][]byte, error) {
+func (b *rpcBackend) GetBlocks(ctx context.Context, blockHashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
+	const op errors.Op = "dcrd.jsonrpc.getblock"
+
+	blocks := make([]*wire.MsgBlock, len(blockHashes))
+	var g errgroup.Group
+	for i := range blockHashes {
+		i := i
+		g.Go(func() error {
+			block, err := b.rpcClient.GetBlock(blockHashes[i])
+			blocks[i] = block
+			return err
+		})
+	}
+	err := g.Wait()
+	if err != nil {
+		return nil, errors.E(op, err)
+	}
+	return blocks, nil
+}
+
+func (b *rpcBackend) GetCFilters(ctx context.Context, blockHashes []*chainhash.Hash) ([]*gcs.Filter, error) {
+	const op errors.Op = "dcrd.jsonrpc.getcfilter"
+
+	// TODO: this is spammy and would be better implemented with a single RPC.
+	filters := make([]*gcs.Filter, len(blockHashes))
+	var g errgroup.Group
+	for i := range blockHashes {
+		i := i
+		g.Go(func() error {
+			f, err := b.rpcClient.GetCFilter(blockHashes[i], wire.GCSFilterRegular)
+			filters[i] = f
+			return err
+		})
+	}
+	err := g.Wait()
+	if err != nil {
+		return nil, errors.E(op, err)
+	}
+	return filters, nil
+}
+
+func (b *rpcBackend) GetHeaders(ctx context.Context, blockLocators []*chainhash.Hash, hashStop *chainhash.Hash) ([]*wire.BlockHeader, error) {
 	const op errors.Op = "dcrd.jsonrpc.getheaders"
 
 	r, err := b.rpcClient.GetHeaders(blockLocators, hashStop)
 	if err != nil {
 		return nil, errors.E(op, err)
 	}
-	headers := make([][]byte, 0, len(r.Headers))
+	headers := make([]*wire.BlockHeader, 0, len(r.Headers))
 	for _, hexHeader := range r.Headers {
-		header, err := hex.DecodeString(hexHeader)
+		header := new(wire.BlockHeader)
+		err := header.Deserialize(newHexReader(hexHeader))
 		if err != nil {
 			return nil, errors.E(op, errors.Encoding, err)
 		}
@@ -84,20 +128,6 @@ func (b *rpcBackend) PublishTransaction(ctx context.Context, tx *wire.MsgTx) err
 	return nil
 }
 
-func (b *rpcBackend) AddressesUsed(ctx context.Context, addrs []dcrutil.Address) (bitset.Bytes, error) {
-	const op errors.Op = "dcrd.jsonrpc.existsaddresses"
-
-	hexBitSet, err := b.rpcClient.ExistsAddresses(addrs)
-	if err != nil {
-		return nil, errors.E(op, err)
-	}
-	bitset, err := hex.DecodeString(hexBitSet)
-	if err != nil {
-		return nil, errors.E(op, errors.Encoding, err)
-	}
-	return bitset, nil
-}
-
 func (b *rpcBackend) Rescan(ctx context.Context, blocks []chainhash.Hash) ([]*wallet.RescannedBlock, error) {
 	const op errors.Op = "dcrd.jsonrpc.rescan"
 
@@ -111,9 +141,10 @@ func (b *rpcBackend) Rescan(ctx context.Context, blocks []chainhash.Hash) ([]*wa
 		if err != nil {
 			return nil, errors.E(op, errors.Encoding, err)
 		}
-		txs := make([][]byte, 0, len(d.Transactions))
+		txs := make([]*wire.MsgTx, 0, len(d.Transactions))
 		for _, txHex := range d.Transactions {
-			tx, err := hex.DecodeString(txHex)
+			tx := new(wire.MsgTx)
+			err := tx.Deserialize(newHexReader(txHex))
 			if err != nil {
 				return nil, errors.E(op, errors.Encoding, err)
 			}
@@ -142,12 +173,27 @@ func (b *rpcBackend) StakeDifficulty(ctx context.Context) (dcrutil.Amount, error
 	return amount, nil
 }
 
-func (b *rpcBackend) GetBlockHash(ctx context.Context, height int32) (*chainhash.Hash, error) {
-	const op errors.Op = "dcrd.jsonrpc.getblockhash"
+// hexReader implements io.Reader to read bytes from a hexadecimal string.
+// TODO: Replace with hex.NewDecoder (available since Go 1.10)
+type hexReader struct {
+	hex   string
+	index int
+}
 
-	hash, err := b.rpcClient.GetBlockHash(int64(height))
-	if err != nil {
-		return nil, errors.E(op, err)
+func newHexReader(s string) *hexReader {
+	return &hexReader{hex: s}
+}
+
+func (r *hexReader) Read(b []byte) (n int, err error) {
+	end := r.index + 2*len(b)
+	if end > len(r.hex) {
+		end = len(r.hex)
 	}
-	return hash, nil
+	src := r.hex[r.index:end]
+	n, err = hex.Decode(b, []byte(src))
+	r.index += 2 * n
+	if err == nil && n == 0 {
+		return 0, io.EOF
+	}
+	return n, err
 }

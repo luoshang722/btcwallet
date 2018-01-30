@@ -11,7 +11,7 @@ import (
 
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/dcrutil"
-	dcrrpcclient "github.com/decred/dcrd/rpcclient"
+	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/errors"
 	"github.com/decred/dcrwallet/ticketbuyer"
 	"github.com/decred/dcrwallet/wallet"
@@ -32,7 +32,7 @@ const (
 // Loader is safe for concurrent access.
 type Loader struct {
 	callbacks   []func(*wallet.Wallet)
-	chainClient *dcrrpcclient.Client
+	backend     wallet.NetworkBackend
 	chainParams *chaincfg.Params
 	dbDirPath   string
 	wallet      *wallet.Wallet
@@ -385,11 +385,20 @@ func (l *Loader) UnloadWallet() error {
 	return nil
 }
 
-// SetChainClient sets the chain server client.
-func (l *Loader) SetChainClient(chainClient *dcrrpcclient.Client) {
+// SetNetworkBackend associates the loader with a wallet network backend.
+func (l *Loader) SetNetworkBackend(n wallet.NetworkBackend) {
 	l.mu.Lock()
-	l.chainClient = chainClient
+	l.backend = n
 	l.mu.Unlock()
+}
+
+// NetworkBackend returns the associated wallet network backend, if any, and a
+// bool describing whether a non-nil network backend was set.
+func (l *Loader) NetworkBackend() (n wallet.NetworkBackend, ok bool) {
+	l.mu.Lock()
+	n = l.backend
+	l.mu.Unlock()
+	return n, n != nil
 }
 
 // StartTicketPurchase launches the ticketbuyer to start purchasing tickets.
@@ -408,12 +417,13 @@ func (l *Loader) StartTicketPurchase(passphrase []byte, ticketbuyerCfg *ticketbu
 		return errors.E(op, errors.Invalid, "wallet must be loaded")
 	}
 
-	if l.chainClient == nil {
+	c, err := chain.RPCClientFromBackend(l.backend)
+	if err != nil {
 		return errors.E(op, errors.Invalid, "dcrd RPC client must be loaded")
 	}
 
 	w := l.wallet
-	p, err := ticketbuyer.NewTicketPurchaser(ticketbuyerCfg, l.chainClient, w, l.chainParams)
+	p, err := ticketbuyer.NewTicketPurchaser(ticketbuyerCfg, c, w, l.chainParams)
 	if err != nil {
 		return errors.E(op, err)
 	}

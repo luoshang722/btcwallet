@@ -1446,7 +1446,7 @@ func (s *walletServer) LoadActiveDataFilters(ctx context.Context, req *pb.LoadAc
 		return nil, err
 	}
 
-	err = s.wallet.LoadActiveDataFilters(n)
+	err = s.wallet.LoadActiveDataFilters(ctx, n)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -2191,7 +2191,7 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 	}
 
 	s.rpcClient = rpcClient
-	s.loader.SetChainClient(rpcClient.Client)
+	s.loader.SetNetworkBackend(chain.BackendFromRPCClient(rpcClient.Client))
 
 	return &pb.StartConsensusRpcResponse{}, nil
 }
@@ -2228,7 +2228,7 @@ func (s *loaderServer) DiscoverAddresses(ctx context.Context, req *pb.DiscoverAd
 	}
 
 	n := chain.BackendFromRPCClient(chainClient.Client)
-	err := wallet.DiscoverActiveAddresses(n, req.DiscoverAccounts)
+	err := wallet.DiscoverActiveAddresses(ctx, n, wallet.ChainParams().GenesisHash, req.DiscoverAccounts)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -2285,7 +2285,7 @@ func (s *loaderServer) FetchHeaders(ctx context.Context, req *pb.FetchHeadersReq
 	n := chain.BackendFromRPCClient(chainClient.Client)
 
 	fetchedHeaderCount, rescanFrom, rescanFromHeight,
-		mainChainTipBlockHash, mainChainTipBlockHeight, err := wallet.FetchHeaders(n)
+		mainChainTipBlockHash, mainChainTipBlockHeight, err := wallet.FetchHeaders(ctx, n)
 	if err != nil {
 		return nil, translateError(err)
 	}
