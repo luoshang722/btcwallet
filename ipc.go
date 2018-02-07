@@ -11,7 +11,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 )
+
+var (
+	msvcrt           = syscall.MustLoadDLL("msvcrt.dll")
+	procGetOSfHandle = msvcrt.MustFindProc("_get_osfhandle")
+)
+
+func _get_osfhandle(fd uintptr) (uintptr, error) {
+	handle, _, err := procGetOSfHandle.Call(fd)
+	return handle, err
+}
 
 // Messages sent over a pipe are encoded using a simple binary message format:
 //
@@ -42,6 +53,10 @@ var outgoingPipeMessages = make(chan pipeMessage)
 // start clean shutdown when the pipe is closed.  Control messages that follow
 // the pipe message format can be added later as needed.
 func serviceControlPipeRx(fd uintptr) {
+	fd, err := _get_osfhandle(fd)
+	if err != nil {
+		panic(err)
+	}
 	pipe := os.NewFile(fd, fmt.Sprintf("|%v", fd))
 	r := bufio.NewReader(pipe)
 	for {
@@ -68,10 +83,13 @@ func serviceControlPipeRx(fd uintptr) {
 func serviceControlPipeTx(fd uintptr) {
 	defer drainOutgoingPipeMessages()
 
+	fd, err := _get_osfhandle(fd)
+	if err != nil {
+		panic(err)
+	}
 	pipe := os.NewFile(fd, fmt.Sprintf("|%v", fd))
 	w := bufio.NewWriter(pipe)
 	headerBuffer := make([]byte, 0, 1+1+255+4) // capped to max header size
-	var err error
 	for m := range outgoingPipeMessages {
 		const protocolVersion byte = 1
 
