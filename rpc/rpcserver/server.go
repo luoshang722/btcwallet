@@ -1661,6 +1661,38 @@ func (s *walletServer) ValidateAddress(ctx context.Context, req *pb.ValidateAddr
 	return result, nil
 }
 
+func (s *walletServer) Spender(ctx context.Context, req *pb.SpenderRequest) (*pb.SpenderResponse, error) {
+	txHash, err := chainhash.NewHash(req.TransactionHash)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid transaction hash: %v", err)
+	}
+	out := wire.OutPoint{Hash: *txHash, Index: req.Index}
+
+	spender, spenderIndex, err := s.wallet.Spender(&out)
+	if err != nil {
+		if apperrors.IsError(err, apperrors.ErrNoExist) {
+			return nil, status.Errorf(codes.NotFound, "output is unspent")
+		}
+		if apperrors.IsError(err, apperrors.ErrInput) {
+			return nil, status.Errorf(codes.InvalidArgument, "output is not relevant to the wallet")
+		}
+		return nil, translateError(err)
+	}
+
+	var buf bytes.Buffer
+	buf.Grow(spender.SerializeSize())
+	err = spender.Serialize(&buf)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	resp := &pb.SpenderResponse{
+		SpenderTransaction: buf.Bytes(),
+		InputIndex:         spenderIndex,
+	}
+	return resp, nil
+}
+
 func marshalTransactionInputs(v []wallet.TransactionSummaryInput) []*pb.TransactionDetails_Input {
 	inputs := make([]*pb.TransactionDetails_Input, len(v))
 	for i := range v {
