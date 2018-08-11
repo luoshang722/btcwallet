@@ -10,6 +10,7 @@ import (
 	"io"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrd/dcrutil"
 	"github.com/decred/dcrd/gcs"
 	"github.com/decred/dcrd/rpcclient"
@@ -44,62 +45,83 @@ func RPCClientFromBackend(n wallet.NetworkBackend) (*rpcclient.Client, error) {
 	return b.rpcClient, nil
 }
 
-func (b *rpcBackend) GetBlocks(ctx context.Context, blockHashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
-	const op errors.Op = "dcrd.jsonrpc.getblock"
+// ctxdo executes f, returning the earliest of f's returned error or a context
+// error.  ctxdo adds early returns for operations which do not understand
+// context, but the operation is not canceled and will continue executing in
+// the background.  If f returns non-nil before the context errors, the error is
+// wrapped with op.
+func ctxdo(ctx context.Context, op errors.Op, f func() error) error {
+	e := make(chan error, 1)
+	go func() { e <- f() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-e:
+		if err != nil {
+			return errors.E(op, err)
+		}
+		return nil
+	}
+}
 
+func (b *rpcBackend) GetBlocks(ctx context.Context, blockHashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
 	blocks := make([]*wire.MsgBlock, len(blockHashes))
 	var g errgroup.Group
 	for i := range blockHashes {
 		i := i
 		g.Go(func() error {
-			block, err := b.rpcClient.GetBlock(blockHashes[i])
-			blocks[i] = block
-			return err
+			return ctxdo(ctx, "dcrd.jsonrpc.getblock", func() error {
+				block, err := b.rpcClient.GetBlock(blockHashes[i])
+				blocks[i] = block
+				return err
+			})
 		})
 	}
 	err := g.Wait()
-	if err != nil {
-		return nil, errors.E(op, err)
-	}
-	return blocks, nil
+	return blocks, err
 }
 
 func (b *rpcBackend) GetCFilters(ctx context.Context, blockHashes []*chainhash.Hash) ([]*gcs.Filter, error) {
-	const op errors.Op = "dcrd.jsonrpc.getcfilter"
-
 	// TODO: this is spammy and would be better implemented with a single RPC.
 	filters := make([]*gcs.Filter, len(blockHashes))
 	var g errgroup.Group
 	for i := range blockHashes {
 		i := i
 		g.Go(func() error {
-			f, err := b.rpcClient.GetCFilter(blockHashes[i], wire.GCSFilterRegular)
-			filters[i] = f
-			return err
+			return ctxdo(ctx, "dcrd.jsonrpc.getcfilter", func() error {
+				f, err := b.rpcClient.GetCFilter(blockHashes[i], wire.GCSFilterRegular)
+				filters[i] = f
+				return err
+			})
 		})
 	}
 	err := g.Wait()
 	if err != nil {
-		return nil, errors.E(op, err)
+		return nil, err
 	}
 	return filters, nil
 }
 
 func (b *rpcBackend) GetHeaders(ctx context.Context, blockLocators []*chainhash.Hash, hashStop *chainhash.Hash) ([]*wire.BlockHeader, error) {
-	const op errors.Op = "dcrd.jsonrpc.getheaders"
-
-	r, err := b.rpcClient.GetHeaders(blockLocators, hashStop)
-	if err != nil {
-		return nil, errors.E(op, err)
-	}
-	headers := make([]*wire.BlockHeader, 0, len(r.Headers))
-	for _, hexHeader := range r.Headers {
-		header := new(wire.BlockHeader)
-		err := header.Deserialize(newHexReader(hexHeader))
+	var headers []*wire.BlockHeader
+	err := ctxdo(ctx, "dcrd.jsonrpc.getheaders", func() error {
+		r, err := b.rpcClient.GetHeaders(blockLocators, hashStop)
 		if err != nil {
-			return nil, errors.E(op, errors.Encoding, err)
+			return err
 		}
-		headers = append(headers, header)
+		headers = make([]*wire.BlockHeader, 0, len(r.Headers))
+		for _, hexHeader := range r.Headers {
+			header := new(wire.BlockHeader)
+			err := header.Deserialize(newHexReader(hexHeader))
+			if err != nil {
+				return errors.E(errors.Encoding, err)
+			}
+			headers = append(headers, header)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return headers, nil
 }
@@ -109,46 +131,48 @@ func (b *rpcBackend) String() string {
 }
 
 func (b *rpcBackend) LoadTxFilter(ctx context.Context, reload bool, addrs []dcrutil.Address, outpoints []wire.OutPoint) error {
-	const op errors.Op = "dcrd.jsonrpc.loadtxfilter"
-
-	err := b.rpcClient.LoadTxFilter(reload, addrs, outpoints)
-	if err != nil {
-		return errors.E(op, err)
-	}
-	return nil
+	return ctxdo(ctx, "dcrd.jsonrpc.loadtxfilter", func() error {
+		return b.rpcClient.LoadTxFilter(reload, addrs, outpoints)
+	})
 }
 
 func (b *rpcBackend) PublishTransactions(ctx context.Context, txs ...*wire.MsgTx) error {
-	const op errors.Op = "dcrd.jsonrpc.sendrawtransaction"
-
 	// sendrawtransaction does not allow orphans, so we can not concurrently or
 	// asynchronously send transactions.  All transaction sends are attempted,
 	// and the first non-nil error is returned.
 	var firstErr error
 	for _, tx := range txs {
-		// High fees are hardcoded and allowed here since transactions created by
-		// the wallet perform their own high fee check if high fees are disabled.
-		// This matches the lack of any high fee checking when publishing
-		// transactions over the wire protocol.
-		_, err := b.rpcClient.SendRawTransaction(tx, true)
+		err := ctxdo(ctx, "dcrd.jsonrpc.sendrawtransaction", func() error {
+			// High fees are hardcoded and allowed here since
+			// transactions created by the wallet perform their own
+			// high fee check if high fees are disabled.  This
+			// matches the lack of any high fee checking when
+			// publishing transactions over the wire protocol.
+			_, err := b.rpcClient.SendRawTransaction(tx, true)
+			return err
+		})
 		if err != nil && firstErr == nil {
+			if err == context.Canceled || err == context.DeadlineExceeded {
+				return err
+			}
 			firstErr = err
 		}
 	}
-	if firstErr != nil {
-		return errors.E(op, firstErr)
-	}
-	return nil
+	return firstErr
 }
 
 func (b *rpcBackend) Rescan(ctx context.Context, blocks []chainhash.Hash, r wallet.RescanSaver) error {
 	const op errors.Op = "dcrd.jsonrpc.rescan"
-
-	res, err := b.rpcClient.Rescan(blocks)
+	var rr *dcrjson.RescanResult
+	err := ctxdo(ctx, op, func() error {
+		var err error
+		rr, err = b.rpcClient.Rescan(blocks)
+		return err
+	})
 	if err != nil {
-		return errors.E(op, err)
+		return err
 	}
-	for _, d := range res.DiscoveredData {
+	for _, d := range rr.DiscoveredData {
 		blockHash, err := chainhash.NewHashFromStr(d.Hash)
 		if err != nil {
 			return errors.E(op, errors.Encoding, err)
@@ -158,7 +182,7 @@ func (b *rpcBackend) Rescan(ctx context.Context, blocks []chainhash.Hash, r wall
 			tx := new(wire.MsgTx)
 			err := tx.Deserialize(newHexReader(txHex))
 			if err != nil {
-				return errors.E(op, errors.Encoding, err)
+				return errors.E(errors.Encoding, err)
 			}
 			txs = append(txs, tx)
 		}
@@ -171,17 +195,19 @@ func (b *rpcBackend) Rescan(ctx context.Context, blocks []chainhash.Hash, r wall
 }
 
 func (b *rpcBackend) StakeDifficulty(ctx context.Context) (dcrutil.Amount, error) {
-	const op errors.Op = "dcrd.jsonrpc.getstakedifficulty"
-
-	r, err := b.rpcClient.GetStakeDifficulty()
+	var sdiff dcrutil.Amount
+	err := ctxdo(ctx, "dcrdr.jsonrpc.getstakedifficulty", func() error {
+		r, err := b.rpcClient.GetStakeDifficulty()
+		if err != nil {
+			return err
+		}
+		sdiff, err = dcrutil.NewAmount(r.NextStakeDifficulty)
+		return err
+	})
 	if err != nil {
-		return 0, errors.E(op, err)
+		return 0, err
 	}
-	amount, err := dcrutil.NewAmount(r.NextStakeDifficulty)
-	if err != nil {
-		return 0, errors.E(op, err)
-	}
-	return amount, nil
+	return sdiff, nil
 }
 
 func (b *rpcBackend) RPCClient() *rpcclient.Client {

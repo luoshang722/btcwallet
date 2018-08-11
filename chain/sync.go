@@ -265,25 +265,6 @@ func (s *RPCSyncer) handleVoteNotifications(ctx context.Context) error {
 	}
 }
 
-// ctxdo executes f, returning the earliest of f's returned error or a context
-// error.  ctxdo adds early returns for operations which do not understand
-// context, but the operation is not canceled and will continue executing in
-// the background.  If f returns non-nil before the context errors, the error is
-// wrapped with op.
-func ctxdo(ctx context.Context, op errors.Op, f func() error) error {
-	e := make(chan error, 1)
-	go func() { e <- f() }()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-e:
-		if err != nil {
-			return errors.E(op, err)
-		}
-		return nil
-	}
-}
-
 // hashStop is a zero value stop hash for fetching all possible data using
 // locators.
 var hashStop chainhash.Hash
@@ -301,10 +282,9 @@ func (s *RPCSyncer) startupSync(ctx context.Context) error {
 	}
 
 	// Request notifications for connected and disconnected blocks.
-	err = s.rpcClient.NotifyBlocks()
+	err = ctxdo(ctx, "dcrd.jsonrpc.notifyblocks", s.rpcClient.NotifyBlocks)
 	if err != nil {
-		const op errors.Op = "dcrd.jsonrpc.notifyblocks"
-		return errors.E(op, err)
+		return err
 	}
 
 	// Fetch new headers and cfilters from the server.
@@ -458,15 +438,19 @@ func (s *RPCSyncer) startupSync(ctx context.Context) error {
 		log.Warnf("Could not publish one or more unmined transactions: %v", err)
 	}
 
-	_, err = s.rpcClient.RawRequest("rebroadcastwinners", nil)
+	err = ctxdo(ctx, "dcrd.jsonrpc.rebroadcastwinners", func() error {
+		_, err := s.rpcClient.RawRequest("rebroadcastwinners", nil)
+		return err
+	})
 	if err != nil {
-		const op errors.Op = "dcrd.jsonrpc.rebroadcastwinners"
-		return errors.E(op, err)
+		return err
 	}
-	_, err = s.rpcClient.RawRequest("rebroadcastmissed", nil)
+	err = ctxdo(ctx, "dcrd.jsonrpc.rebroadcastmissed", func() error {
+		_, err := s.rpcClient.RawRequest("rebroadcastmissed", nil)
+		return err
+	})
 	if err != nil {
-		const op errors.Op = "dcrd.jsonrpc.rebroadcastmissed"
-		return errors.E(op, err)
+		return err
 	}
 
 	log.Infof("Blockchain sync completed, wallet ready for general usage.")
