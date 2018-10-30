@@ -168,6 +168,9 @@ type config struct {
 	AddrIdxScanLen  int                     `long:"addridxscanlen" description:"DEPRECATED -- use gaplimit instead"`
 	RollbackTest    bool                    `hidden:"y" long:"rollbacktest" description:"Rollback testing is a simnet testing mode that eventually stops wallet and examines wtxmgr database integrity"`
 	AutomaticRepair bool                    `hidden:"y" long:"automaticrepair" description:"Attempt to repair the wallet automatically if a database inconsistency is found"`
+
+	PiVoterNet string `long:"pivoternet" description:"CIDR network or IP address of Politeia voter client"`
+	piVoterNet *net.IPNet
 }
 
 type ticketBuyerOptions struct {
@@ -1027,6 +1030,21 @@ func loadConfig(ctx context.Context) (*config, []string, error) {
 				" found (%v) and can probably be removed.",
 				oldDir)
 		}
+	}
+
+	if cfg.PiVoterNet != "" {
+		_, ipnet, err := net.ParseCIDR(cfg.PiVoterNet)
+		if err != nil {
+			ip := net.ParseIP(cfg.PiVoterNet)
+			if ip == nil {
+				return nil, nil, err
+			}
+			ipnet = &net.IPNet{
+				IP:   ip,
+				Mask: net.CIDRMask(8*len(ip), 8*len(ip)),
+			}
+		}
+		cfg.piVoterNet = ipnet
 	}
 
 	return &cfg, remainingArgs, nil

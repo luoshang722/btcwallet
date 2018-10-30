@@ -197,6 +197,26 @@ func startRPCServers(walletLoader *loader.Loader) (*grpc.Server, *legacyrpc.Serv
 	return server, legacyServer, nil
 }
 
+var piVoterMethods = []string{
+	"/walletrpc.WalletService/Accounts",
+	"/walletrpc.WalletService/CommittedTickets",
+	"/walletrpc.WalletService/SignMessages",
+}
+
+func pass(method string, ip net.IP) bool {
+	if cfg.piVoterNet == nil {
+		// unset config option, pass everything
+		return true
+	}
+	for _, m := range piVoterMethods {
+		if m != method {
+			continue
+		}
+		return cfg.piVoterNet.Contains(ip)
+	}
+	return false
+}
+
 // serviceName returns the package.service segment from the full gRPC method
 // name `/package.service/method`.
 func serviceName(method string) string {
@@ -211,6 +231,15 @@ func interceptStreaming(srv interface{}, ss grpc.ServerStream, info *grpc.Stream
 	if ok {
 		grpcLog.Infof("Streaming method %s invoked by %s", info.FullMethod,
 			p.Addr.String())
+	} else {
+		return errors.E("cannot determine peer from context")
+	}
+	tcpAddr, ok := p.Addr.(*net.TCPAddr)
+	if !ok {
+		return errors.E("cannot determine peer TCP address")
+	}
+	if !pass(info.FullMethod, tcpAddr.IP) {
+		return errors.E("method not allowed")
 	}
 	err := rpcserver.ServiceReady(serviceName(info.FullMethod))
 	if err != nil {
@@ -229,6 +258,15 @@ func interceptUnary(ctx context.Context, req interface{}, info *grpc.UnaryServer
 	if ok {
 		grpcLog.Infof("Unary method %s invoked by %s", info.FullMethod,
 			p.Addr.String())
+	} else {
+		return nil, errors.E("cannot determine peer from context")
+	}
+	tcpAddr, ok := p.Addr.(*net.TCPAddr)
+	if !ok {
+		return nil, errors.E("cannot determine peer TCP address")
+	}
+	if !pass(info.FullMethod, tcpAddr.IP) {
+		return nil, errors.E("method not allowed")
 	}
 	err = rpcserver.ServiceReady(serviceName(info.FullMethod))
 	if err != nil {
