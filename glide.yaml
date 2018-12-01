@@ -1,0 +1,44 @@
+package: github.com/luoshang722/qtumwallet
+import:
+- package: github.com/boltdb/bolt
+- package: github.com/btcsuite/btclog
+- package: github.com/btcsuite/golangcrypto
+  subpackages:
+  - nacl/secretbox
+  - ripemd160
+  - scrypt
+  - ssh/terminal
+- package: github.com/btcsuite/seelog
+- package: github.com/btcsuite/websocket
+- package: github.com/golang/protobuf
+  subpackages:
+  - proto
+- package: github.com/jessevdk/go-flags
+- package: github.com/luoshang722/qtumd
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - chaincfg/chainhash
+  - rpcclient
+  - txscript
+  - wire
+- package: github.com/luoshang722/qtumutil
+  subpackages:
+  - hdkeychain
+- package: golang.org/x/crypto
+  subpackages:
+  - ssh/terminal
+- package: golang.org/x/net
+  subpackages:
+  - context
+- package: google.golang.org/grpc
+  subpackages:
+  - codes
+  - credentials
+  - grpclog
+testImport:
+- package: github.com/davecgh/go-spew
+  subpackages:
+  - spew
